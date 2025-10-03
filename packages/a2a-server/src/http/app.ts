@@ -16,6 +16,11 @@ import type { AgentSettings } from '../types.js';
 import { GCSTaskStore, NoOpTaskStore } from '../persistence/gcs.js';
 import { CoderAgentExecutor } from '../agent/executor.js';
 import { requestStorage } from './requestStorage.js';
+import { loadSettings } from '../config/settings.js';
+import { loadConfig } from '../config/config.js';
+import { registerOpenAIEndpoints } from './openaiProxy.js';
+import { registerGeminiEndpoints } from './geminiProxy.js';
+import { registerClaudeEndpoints } from './claudeProxy.js';
 
 const coderAgentCard: AgentCard = {
   name: 'Gemini SDLC Agent',
@@ -93,7 +98,29 @@ export async function createApp() {
 
     const appBuilder = new A2AExpressApp(requestHandler);
     expressApp = appBuilder.setupRoutes(expressApp, '');
-    expressApp.use(express.json());
+
+    // Initialize a Config instance for API proxy endpoints.
+    // Requires env: set USE_CCPA=1 for Login with Google, or provide GEMINI_API_KEY.
+    try {
+      const settings = loadSettings(process.cwd());
+      const config = await loadConfig(settings, [], uuidv4());
+
+      const apiProxyRouter = express.Router();
+      apiProxyRouter.use(express.json({ limit: '100mb' }));
+      apiProxyRouter.use(express.urlencoded({ limit: '100mb', extended: true }));
+
+      registerOpenAIEndpoints(apiProxyRouter, config);
+      registerGeminiEndpoints(apiProxyRouter, config);
+      registerClaudeEndpoints(apiProxyRouter, config);
+
+      expressApp.use('/', apiProxyRouter);
+
+      logger.info('[CoreAgent] OpenAI-compatible endpoints mounted at /v1/chat/completions');
+      logger.info('[CoreAgent] Gemini-compatible endpoints mounted at /v1beta/models/*');
+      logger.info('[CoreAgent] Claude-compatible endpoints mounted at /v1/messages');
+    } catch (e) {
+      logger.warn('[CoreAgent] Skipping API proxy endpoints:', e);
+    }
 
     expressApp.post('/tasks', async (req, res) => {
       try {
@@ -172,9 +199,9 @@ export async function createApp() {
 export async function main() {
   try {
     const expressApp = await createApp();
-    const port = process.env['CODER_AGENT_PORT'] || 0;
+    const port = Number(process.env['CODER_AGENT_PORT']) || 0;
 
-    const server = expressApp.listen(port, () => {
+    const server = expressApp.listen(port, '127.0.0.1', () => {
       const address = server.address();
       let actualPort;
       if (process.env['CODER_AGENT_PORT']) {
