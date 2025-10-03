@@ -7,16 +7,23 @@
 import type express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
-import { DEFAULT_GEMINI_FLASH_MODEL, StreamEventType, getResponseText } from '@google/gemini-cli-core';
+import { DEFAULT_GEMINI_FLASH_MODEL, StreamEventType } from '@google/gemini-cli-core';
 import type { StreamEvent } from '@google/gemini-cli-core';
 import type { Content } from '@google/genai';
 
+interface ClaudeContentBlock {
+  type: 'text' | 'tool_use' | 'tool_result';
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, any>;
+  tool_use_id?: string;
+  content?: string;
+}
+
 interface ClaudeMessage {
   role: 'user' | 'assistant';
-  content: Array<{
-    type: 'text';
-    text: string;
-  }> | string;
+  content: ClaudeContentBlock[] | string;
 }
 
 interface ClaudeRequest {
@@ -41,7 +48,51 @@ interface ClaudeRequest {
   }>;
 }
 
-export function registerClaudeEndpoints(app: express.Router, config: Config) {
+/**
+ * Clean JSON Schema by removing metadata fields that Gemini API doesn't accept
+ */
+function cleanSchema(schema: any): any {
+  if (!schema || typeof schema !== 'object') return schema;
+
+  // Remove JSON Schema metadata fields
+  const { $schema, $id, $ref, $comment, definitions, $defs, ...rest } = schema;
+
+  // Recursively clean nested objects
+  const cleaned: any = {};
+  for (const [key, value] of Object.entries(rest)) {
+    if (key === 'properties' && typeof value === 'object') {
+      cleaned[key] = {};
+      for (const [propKey, propValue] of Object.entries(value as any)) {
+        cleaned[key][propKey] = cleanSchema(propValue);
+      }
+    } else if (key === 'items' && typeof value === 'object') {
+      cleaned[key] = cleanSchema(value);
+    } else if (key === 'additionalProperties' && typeof value === 'object') {
+      cleaned[key] = cleanSchema(value);
+    } else if (Array.isArray(value)) {
+      cleaned[key] = value.map(item => typeof item === 'object' ? cleanSchema(item) : item);
+    } else {
+      cleaned[key] = value;
+    }
+  }
+
+  return cleaned;
+}
+
+/**
+ * Filter out thought parts and thoughtSignature from response to save context space
+ */
+function filterThoughtParts(parts: any[]): any[] {
+  return parts
+    .filter(p => !p.thought)  // 过滤 thought: true 的 parts
+    .map(p => {
+      // 从每个 part 中删除 thoughtSignature 字段
+      const { thoughtSignature, ...rest } = p;
+      return rest;
+    });
+}
+
+export function registerClaudeEndpoints(app: express.Router, defaultConfig: Config) {
   // Claude-compatible /v1/messages endpoint
   app.post('/v1/messages', async (req: express.Request, res: express.Response) => {
     try {
@@ -49,40 +100,88 @@ export function registerClaudeEndpoints(app: express.Router, config: Config) {
       const stream = Boolean(body.stream);
       const model = body.model || DEFAULT_GEMINI_FLASH_MODEL;
 
+      // Check for X-Working-Directory header to support per-request working directory
+      const workingDirectory = req.headers['x-working-directory'] as string | undefined;
+      let config = defaultConfig;
+
+      if (workingDirectory) {
+        // Create a new config with the specified working directory
+        const { loadConfig } = await import('../config/config.js');
+        const { loadSettings } = await import('../config/settings.js');
+        const settings = loadSettings(workingDirectory);
+        config = await loadConfig(settings, [], req.headers['x-request-id'] as string || Date.now().toString(), workingDirectory);
+      }
+
       // Extract parameters
       const temperature = body.temperature;
       const topP = body.top_p;
       const maxOutputTokens = body.max_tokens || 4096;
 
-      // Build Gemini-compatible contents array
-      const contents: Content[] = body.messages.map((message: ClaudeMessage) => {
-        const content = typeof message.content === 'string'
-          ? message.content
-          : message.content.map((c: any) => c.text).join('\n');
-        return {
-          role: message.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: content }]
-        };
-      });
+      // Build Gemini-compatible contents array with tool support
+      const contents: Content[] = [];
+      const toolUseMap = new Map<string, string>(); // tool_use_id -> name
 
-      // Handle system prompt
-      if (body.system) {
-        const systemContent = typeof body.system === 'string'
-          ? body.system
-          : body.system.map((s: any) => s.text).join('\n');
+      for (const message of body.messages) {
+        if (typeof message.content === 'string') {
+          // Simple text message
+          contents.push({
+            role: message.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: message.content }]
+          });
+        } else {
+          // Structured content blocks
+          const parts: any[] = [];
 
-        const systemInstruction = {
-          role: 'user',
-          parts: [{ text: `System Instructions:\n${systemContent}\n\nIMPORTANT: Follow these instructions for all responses.` }]
-        };
+          for (const block of message.content) {
+            if (block.type === 'text' && block.text) {
+              parts.push({ text: block.text });
+            } else if (block.type === 'tool_use' && block.id && block.name) {
+              // Assistant tool call -> Gemini functionCall
+              toolUseMap.set(block.id, block.name);
+              parts.push({
+                functionCall: {
+                  name: block.name,
+                  args: block.input || {}
+                }
+              });
+            } else if (block.type === 'tool_result' && block.tool_use_id) {
+              // User tool result -> Gemini functionResponse
+              const toolName = toolUseMap.get(block.tool_use_id) || 'unknown';
+              parts.push({
+                functionResponse: {
+                  name: toolName,
+                  response: { result: block.content || '' }
+                }
+              });
+            }
+          }
 
-        const modelResponse = {
-          role: 'model',
-          parts: [{ text: 'Understood. I will follow these instructions.' }]
-        };
-
-        contents.unshift(systemInstruction, modelResponse);
+          if (parts.length > 0) {
+            contents.push({
+              role: message.role === 'assistant' ? 'model' : 'user',
+              parts
+            });
+          }
+        }
       }
+
+      // Handle system prompt and tools
+      let systemInstruction: Content | undefined;
+      if (body.system) {
+        const systemContent =
+          typeof body.system === 'string'
+            ? body.system
+            : body.system.map((s: any) => s.text).join('\n');
+        systemInstruction = { parts: [{ text: systemContent }], role: 'system' };
+      }
+
+      const tools = body.tools
+        ? [{ functionDeclarations: body.tools.map(t => ({
+            name: t.name,
+            description: t.description || '',
+            parameters: cleanSchema(t.input_schema)
+          })) }]
+        : undefined;
 
       if (stream) {
         // SSE streaming response
@@ -103,6 +202,9 @@ export function registerClaudeEndpoints(app: express.Router, config: Config) {
 
 
           const chat = await config.getGeminiClient().startChat(history);
+          if (tools) {
+            chat.setTools(tools);
+          }
           const promptId = uuidv4();
           const streamGen = await chat.sendMessageStream(
             model,
@@ -112,6 +214,7 @@ export function registerClaudeEndpoints(app: express.Router, config: Config) {
                 temperature,
                 topP,
                 maxOutputTokens,
+                ...(systemInstruction && { systemInstruction }),
               },
             },
             promptId,
@@ -163,18 +266,37 @@ export function registerClaudeEndpoints(app: express.Router, config: Config) {
             });
           };
 
-          let accumulatedText = '';
+          let previousText = '';
           for await (const chunk of streamGen as AsyncGenerator<StreamEvent>) {
             if (chunk.type === StreamEventType.RETRY) continue;
 
             const chunkResp = chunk.value;
-            accumulatedText += getResponseText(chunkResp) ?? '';
+
+            // Filter thought parts from chunk
+            const rawParts = chunkResp.candidates?.[0]?.content?.parts || [];
+            const filteredParts = filterThoughtParts(rawParts);
+
+            // Extract text only from non-thought, non-function parts
+            const textParts = filteredParts.filter((p: any) => p.text && !p.functionCall);
+            const currentText = textParts.map((p: any) => p.text).join('');
+
+            const textDelta = currentText.substring(previousText.length);
+            previousText = currentText;
+
+            if (textDelta) {
+              startTextBlock();
+              writeEvent('content_block_delta', {
+                type: 'content_block_delta',
+                index: currentContentIndex,
+                delta: { type: 'text_delta', text: textDelta },
+              });
+            }
 
             // Ideal path: Handle structured function calls from the model
-            const functionCalls = chunkResp.candidates?.[0]?.content?.parts?.filter(p => p.functionCall);
+            const functionCalls = filteredParts.filter((p: any) => p.functionCall);
             if (functionCalls && functionCalls.length > 0) {
               for (const part of functionCalls) {
-                if(part.functionCall) {
+                if (part.functionCall) {
                   stopCurrentBlock();
                   currentContentIndex++;
                   currentBlockType = 'tool_use';
@@ -193,60 +315,6 @@ export function registerClaudeEndpoints(app: express.Router, config: Config) {
                 }
               }
             }
-          }
-
-          // Fallback path: Manually parse for tool_code blocks if no function calls were found
-          if (accumulatedText.includes('[tool_code]')) {
-            const parts = accumulatedText.split(/(\[tool_code\][\s\S]*?\[\/tool_code\])/);
-            for (const part of parts) {
-              if (part.startsWith('[tool_code]')) {
-                const toolCode = part.replace('[tool_code]', '').replace('[/tool_code]', '').trim();
-                const match = toolCode.match(/(\w+)\(([\s\S]*)\)/);
-                if (match) {
-                  const toolName = match[1];
-                  const toolArgsRaw = match[2];
-                  let toolArgs = {};
-                  try {
-                    // This is a rough parse, assumes simple key="value" pairs.
-                    const argsMatch = toolArgsRaw.match(/(\w+)="([^"]+)"/);
-                    if(argsMatch) {
-                      toolArgs = { [argsMatch[1]]: argsMatch[2] };
-                    }
-                  } catch (e) { /* ignore parse error */ }
-
-                  stopCurrentBlock();
-                  currentContentIndex++;
-                  currentBlockType = 'tool_use';
-                  const toolId = `toolu_${uuidv4()}`;
-                  writeEvent('content_block_start', {
-                    type: 'content_block_start',
-                    index: currentContentIndex,
-                    content_block: { type: 'tool_use', id: toolId, name: toolName, input: {} },
-                  });
-                  writeEvent('content_block_delta', {
-                    type: 'content_block_delta',
-                    index: currentContentIndex,
-                    delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolArgs) },
-                  });
-                  stopCurrentBlock();
-                }
-              } else if (part.trim()) {
-                startTextBlock();
-                writeEvent('content_block_delta', {
-                  type: 'content_block_delta',
-                  index: currentContentIndex,
-                  delta: { type: 'text_delta', text: part },
-                });
-              }
-            }
-          } else if (accumulatedText.trim()) {
-            // No tool calls at all, just send the text
-            startTextBlock();
-            writeEvent('content_block_delta', {
-              type: 'content_block_delta',
-              index: currentContentIndex,
-              delta: { type: 'text_delta', text: accumulatedText },
-            });
           }
 
           stopCurrentBlock();
@@ -291,25 +359,45 @@ export function registerClaudeEndpoints(app: express.Router, config: Config) {
               temperature,
               topP,
               maxOutputTokens,
+              ...(tools && { tools }),
+              ...(systemInstruction && { systemInstruction }),
             },
             new AbortController().signal,
             model,
           );
 
-        const text = getResponseText(response) ?? '';
         const usage = (response as any).usageMetadata;
+        const content: any[] = [];
+
+        // Filter thought parts first
+        const parts = filterThoughtParts(response.candidates?.[0]?.content?.parts || []);
+
+        // Extract text from filtered parts
+        const textParts = parts.filter((p: any) => p.text && !p.functionCall);
+        if (textParts.length > 0) {
+          const text = textParts.map((p: any) => p.text).join('');
+          content.push({ type: 'text', text });
+        }
+
+        // Check for tool calls (functionCall)
+        for (const part of parts) {
+          if ((part as any).functionCall) {
+            const fc = (part as any).functionCall;
+            content.push({
+              type: 'tool_use',
+              id: `toolu_${uuidv4()}`,
+              name: fc.name,
+              input: fc.args || {}
+            });
+          }
+        }
 
         const result = {
           id: `msg_${uuidv4()}`,
           type: 'message',
           role: 'assistant',
           model,
-          content: [
-            {
-              type: 'text',
-              text,
-            },
-          ],
+          content,
           stop_reason: 'end_turn',
           stop_sequence: null,
           usage: {

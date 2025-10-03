@@ -128,6 +128,8 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
                   ],
                 };
                 res.write(`data: ${JSON.stringify(payload)}\n\n`);
+                // @ts-ignore
+                res.flush && res.flush();
                 accumulatedText += delta;
                 firstChunk = false;
               }
@@ -157,6 +159,8 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
               ],
             };
             res.write(`data: ${JSON.stringify(toolCallPayload)}\n\n`);
+            // @ts-ignore
+            res.flush && res.flush();
           }
 
           // Final stop chunk
@@ -170,6 +174,8 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
             ],
           };
           res.write(`data: ${JSON.stringify(stopPayload)}\n\n`);
+          // @ts-ignore
+          res.flush && res.flush();
           res.write('data: [DONE]\n\n');
           res.end();
         } catch (err) {

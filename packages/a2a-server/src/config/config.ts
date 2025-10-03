@@ -31,9 +31,10 @@ export async function loadConfig(
   settings: Settings,
   extensions: Extension[],
   taskId: string,
+  workingDirectory?: string,
 ): Promise<Config> {
   const mcpServers = mergeMcpServers(settings, extensions);
-  const workspaceDir = process.cwd();
+  const workspaceDir = workingDirectory || process.cwd();
   const adcFilePath = process.env['GOOGLE_APPLICATION_CREDENTIALS'];
 
   const configParams: ConfigParameters = {

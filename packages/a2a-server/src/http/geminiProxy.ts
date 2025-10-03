@@ -242,6 +242,8 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
               };
 
               res.write(`data: ${JSON.stringify(response)}\n\n`);
+              // @ts-ignore
+              res.flush && res.flush();
 
               // Check if this is the final chunk
               const finishReason = candidates[0]?.finishReason;
