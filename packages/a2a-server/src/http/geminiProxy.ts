@@ -7,11 +7,19 @@
 import type express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
-import type { Content, GenerateContentResponse } from '@google/genai';
+import type { Content, GenerateContentResponse, Part } from '@google/genai';
 
 interface GeminiPart {
   text?: string;
   thought?: boolean;
+  functionCall?: {
+    name: string;
+    args: Record<string, unknown>;
+  };
+  functionResponse?: {
+    name: string;
+    response: Record<string, unknown>;
+  };
 }
 
 interface GeminiContent {
@@ -32,6 +40,7 @@ interface GeminiRequest {
   contents: GeminiContent[];
   generationConfig?: GeminiGenerationConfig;
   safetySettings?: Array<Record<string, unknown>>;
+  systemInstruction?: string | Part | Part[] | Content;
   tools?: Array<{
     functionDeclarations?: Array<{
       name: string;
@@ -45,7 +54,7 @@ interface GeminiCandidate {
   content: GeminiContent;
   finishReason: string;
   index: number;
-  safetyRatings?: Array<Record<string, unknown>>;
+  safetyRatings?: any[];
 }
 
 interface GeminiUsageMetadata {
@@ -66,19 +75,12 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
     return match ? match[1] : 'gemini-2.0-flash';
   };
 
-  // Helper to convert Gemini contents to text
-  const contentsToText = (contents: GeminiContent[]): string => {
-    return contents
-      .map(content => {
-        const role = content.role === 'system' ? '(system)' : '';
-        const text = content.parts
-          .filter(p => !p.thought && p.text)
-          .map(p => p.text)
-          .join(' ');
-        return role ? `${role} ${text}` : text;
-      })
-      .filter(Boolean)
-      .join('\n\n');
+  // Helper to convert request tools to Gemini Tool format
+  const convertTools = (tools?: Array<{ functionDeclarations?: Array<any> }>): any[] => {
+    if (!tools || tools.length === 0) return [];
+    return tools.map(tool => ({
+      functionDeclarations: tool.functionDeclarations || []
+    }));
   };
 
   // Non-streaming generateContent endpoint
@@ -87,15 +89,14 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       const body = req.body as GeminiRequest;
       const model = extractModel(req.path);
 
+      // ✅ 直接传递 Gemini 原生结构
+      const contents = (body.contents || []) as Content[];
+      const tools = convertTools(body.tools);
+      const systemInstruction = body.systemInstruction;
+
       const temperature = body.generationConfig?.temperature;
       const topP = body.generationConfig?.topP;
       const maxOutputTokens = body.generationConfig?.maxOutputTokens;
-
-      const userText = contentsToText(body.contents || []);
-
-      const contents = [
-        { role: 'user', parts: [{ text: userText }] },
-      ] as Content[];
 
       const response = await config
         .getGeminiClient()
@@ -105,25 +106,23 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
             temperature,
             topP,
             maxOutputTokens,
+            ...(tools.length > 0 && { tools }),
+            ...(systemInstruction && { systemInstruction }),
           },
           new AbortController().signal,
           model,
         );
 
-      const text = extractTextFromResponse(response);
+      // ✅ 直接返回 Gemini 原生响应格式
       const usage = (response as GenerateContentResponse & { usageMetadata?: any }).usageMetadata;
 
       const result: GeminiResponse = {
-        candidates: [
-          {
-            content: {
-              role: 'model',
-              parts: [{ text }],
-            },
-            finishReason: 'STOP',
-            index: 0,
-          },
-        ],
+        candidates: response.candidates?.map((candidate, index) => ({
+          content: candidate.content as GeminiContent,
+          finishReason: candidate.finishReason || 'STOP',
+          index,
+          safetyRatings: candidate.safetyRatings
+        })) || [],
         usageMetadata: usage
           ? {
               promptTokenCount: usage.promptTokenCount || 0,
@@ -147,11 +146,14 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       const model = extractModel(req.path);
       const useSSE = req.query['alt'] === 'sse';
 
+      // ✅ 直接传递 Gemini 原生结构
+      const contents = (body.contents || []) as Content[];
+      const tools = convertTools(body.tools);
+      const systemInstruction = body.systemInstruction;
+
       const temperature = body.generationConfig?.temperature;
       const topP = body.generationConfig?.topP;
       const maxOutputTokens = body.generationConfig?.maxOutputTokens;
-
-      const userText = contentsToText(body.contents || []);
 
       if (useSSE) {
         // SSE streaming
@@ -162,80 +164,73 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
         res.flushHeaders && res.flushHeaders();
 
         try {
-          const chat = await config.getGeminiClient().startChat();
+          // ✅ 使用完整对话历史启动 chat (如果有多轮对话)
+          const history = contents.length > 1 ? contents.slice(0, -1) : [];
+          const lastMessage = contents[contents.length - 1];
+
+          const chat = await config.getGeminiClient().startChat(history);
+
+          // ✅ 设置工具和系统指令
+          if (tools.length > 0) {
+            chat.setTools(tools);
+          }
+
           const promptId = uuidv4();
+          const lastMessageText = lastMessage?.parts?.[0]?.text || '';
+
           const streamGen = await chat.sendMessageStream(
             model,
             {
-              message: userText,
+              message: lastMessageText,
               config: {
                 temperature,
                 topP,
                 maxOutputTokens,
+                ...(systemInstruction && { systemInstruction }),
               },
             },
             promptId,
           );
 
-          let accumulatedText = '';
           let usageMetadata: GeminiUsageMetadata | undefined;
 
           for await (const chunk of streamGen) {
-            const chunkText = extractTextFromResponse(chunk);
+            // ✅ 直接传递 Gemini 原生响应块 (支持 functionCall)
+            const data = (chunk as Record<string, any>)?.['type'] === 'chunk' && (chunk as Record<string, any>)?.['value']
+              ? (chunk as Record<string, any>)['value']
+              : chunk;
 
-            if (chunkText && chunkText.length > 0) {
-              const delta = chunkText.slice(accumulatedText.length);
-              if (delta.length > 0) {
-                accumulatedText += delta;
+            const candidates = (data as Record<string, any>)?.['candidates'];
 
-                // Update usage metadata if available
-                const chunkUsage = ((chunk as Record<string, any>)?.['value']?.['usageMetadata'] || (chunk as Record<string, any>)?.['usageMetadata']) as GeminiUsageMetadata | undefined;
-                if (chunkUsage) {
-                  usageMetadata = {
-                    promptTokenCount: chunkUsage.promptTokenCount || 0,
-                    candidatesTokenCount: chunkUsage.candidatesTokenCount || 0,
-                    totalTokenCount: chunkUsage.totalTokenCount || 0,
-                  };
-                }
-
-                // Router expects incremental chunks, not accumulated text
-                const response: GeminiResponse = {
-                  candidates: [
-                    {
-                      content: {
-                        role: 'model',
-                        parts: [{ text: delta }],  // Send delta for compatibility with router
-                      },
-                      finishReason: '',
-                      index: 0,
-                    },
-                  ],
-                  usageMetadata,
+            if (candidates && candidates.length > 0) {
+              // Update usage metadata if available
+              const chunkUsage = (data as Record<string, any>)?.['usageMetadata'] as GeminiUsageMetadata | undefined;
+              if (chunkUsage) {
+                usageMetadata = {
+                  promptTokenCount: chunkUsage.promptTokenCount || 0,
+                  candidatesTokenCount: chunkUsage.candidatesTokenCount || 0,
+                  totalTokenCount: chunkUsage.totalTokenCount || 0,
                 };
-
-                res.write(`data: ${JSON.stringify(response)}\n\n`);
               }
-            }
 
-            // Check if this is the final chunk
-            const finishReason = ((chunk as Record<string, any>)?.['value']?.['candidates']?.[0]?.['finishReason'] ||
-                               (chunk as Record<string, any>)?.['candidates']?.[0]?.['finishReason']) as string | undefined;
-            if (finishReason === 'STOP') {
-              const finalResponse: GeminiResponse = {
-                candidates: [
-                  {
-                    content: {
-                      role: 'model',
-                      parts: [{ text: '' }],  // Empty text for final marker when in incremental mode
-                    },
-                    finishReason: 'STOP',
-                    index: 0,
-                  },
-                ],
+              // ✅ 直接返回原生格式 (包括 parts 中的 functionCall)
+              const response: GeminiResponse = {
+                candidates: candidates.map((candidate: any, index: number) => ({
+                  content: candidate.content as GeminiContent,
+                  finishReason: candidate.finishReason || '',
+                  index,
+                  safetyRatings: candidate.safetyRatings
+                })),
                 usageMetadata,
               };
-              res.write(`data: ${JSON.stringify(finalResponse)}\n\n`);
-              break;
+
+              res.write(`data: ${JSON.stringify(response)}\n\n`);
+
+              // Check if this is the final chunk
+              const finishReason = candidates[0]?.finishReason;
+              if (finishReason === 'STOP' || finishReason === 'MAX_TOKENS') {
+                break;
+              }
             }
           }
 
@@ -249,11 +244,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
         }
       } else {
         // Non-SSE streaming (return full response)
-        // Fall back to non-streaming behavior for simplicity
-        const contents = [
-          { role: 'user', parts: [{ text: userText }] },
-        ] as Content[];
-
+        // ✅ 使用相同的原生结构逻辑
         const response = await config
           .getGeminiClient()
           .generateContent(
@@ -262,25 +253,22 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
               temperature,
               topP,
               maxOutputTokens,
+              ...(tools.length > 0 && { tools }),
+              ...(systemInstruction && { systemInstruction }),
             },
             new AbortController().signal,
             model,
           );
 
-        const text = extractTextFromResponse(response);
         const usage = (response as GenerateContentResponse & { usageMetadata?: any }).usageMetadata;
 
         const result: GeminiResponse = {
-          candidates: [
-            {
-              content: {
-                role: 'model',
-                parts: [{ text }],
-              },
-              finishReason: 'STOP',
-              index: 0,
-            },
-          ],
+          candidates: response.candidates?.map((candidate, index) => ({
+            content: candidate.content as GeminiContent,
+            finishReason: candidate.finishReason || 'STOP',
+            index,
+            safetyRatings: candidate.safetyRatings
+          })) || [],
           usageMetadata: usage
             ? {
                 promptTokenCount: usage.promptTokenCount || 0,
@@ -297,24 +285,4 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       res.status(400).json({ error: { message } });
     }
   });
-}
-
-function extractTextFromResponse(resp: unknown): string {
-  try {
-    // Handle streaming chunk format {type: "chunk", value: {...}}
-    const data = (resp as Record<string, any>)?.['type'] === 'chunk' && (resp as Record<string, any>)?.['value'] ? (resp as Record<string, any>)['value'] : resp;
-
-    if ((data as Record<string, any>)?.['candidates']?.[0]?.['content']?.['parts']) {
-      const parts = (data as Record<string, any>)['candidates'][0]['content']['parts'];
-      const texts = parts
-        .filter((p: Record<string, any>) => !p['thought']) // Skip thought parts
-        .map((p: Record<string, any>) => (typeof p['text'] === 'string' ? p['text'] : ''))
-        .filter(Boolean);
-      return texts.join('');
-    }
-    if (typeof (data as Record<string, any>)?.['text'] === 'function') return (data as Record<string, any>)['text']();
-  } catch {
-    // Ignore errors and return empty string
-  }
-  return '';
 }
