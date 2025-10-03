@@ -83,6 +83,17 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
     }));
   };
 
+  // Helper to filter out thought parts and thoughtSignature from response
+  const filterThoughtParts = (parts: any[]): any[] => {
+    return parts
+      .filter(p => !p.thought)  // 过滤 thought: true 的 parts
+      .map(p => {
+        // 从每个 part 中删除 thoughtSignature 字段
+        const { thoughtSignature, ...rest } = p;
+        return rest;
+      });
+  };
+
   // Non-streaming generateContent endpoint
   app.post('/v1beta/models/:model\\:generateContent', async (req: express.Request, res: express.Response) => {
     try {
@@ -118,7 +129,10 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
 
       const result: GeminiResponse = {
         candidates: response.candidates?.map((candidate, index) => ({
-          content: candidate.content as GeminiContent,
+          content: {
+            ...candidate.content,
+            parts: filterThoughtParts(candidate.content?.parts || [])
+          } as GeminiContent,
           finishReason: candidate.finishReason || 'STOP',
           index,
           safetyRatings: candidate.safetyRatings
@@ -213,10 +227,13 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
                 };
               }
 
-              // ✅ 直接返回原生格式 (包括 parts 中的 functionCall)
+              // ✅ 直接返回原生格式 (包括 parts 中的 functionCall)，过滤 thought
               const response: GeminiResponse = {
                 candidates: candidates.map((candidate: any, index: number) => ({
-                  content: candidate.content as GeminiContent,
+                  content: {
+                    ...candidate.content,
+                    parts: filterThoughtParts(candidate.content?.parts || [])
+                  } as GeminiContent,
                   finishReason: candidate.finishReason || '',
                   index,
                   safetyRatings: candidate.safetyRatings
@@ -264,7 +281,10 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
 
         const result: GeminiResponse = {
           candidates: response.candidates?.map((candidate, index) => ({
-            content: candidate.content as GeminiContent,
+            content: {
+              ...candidate.content,
+              parts: filterThoughtParts(candidate.content?.parts || [])
+            } as GeminiContent,
             finishReason: candidate.finishReason || 'STOP',
             index,
             safetyRatings: candidate.safetyRatings
