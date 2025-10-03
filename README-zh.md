@@ -1,30 +1,28 @@
-# Gemini CLI - A2A API Proxy Server
+# Gemini CLI - A2A API 中转服务
 
-[中文](README-zh.md)
+基于 `@google/gemini-cli@0.8.0-preview.1` 改造的 API 中转服务，将 Claude/OpenAI API 请求转发到 Google Gemini。
 
-An API proxy server based on `@google/gemini-cli@0.8.0-preview.1` that forwards Claude/OpenAI API requests to Google Gemini.
+## 特性
 
-## Features
-
-🔄 **Multi-Protocol Support**
+🔄 **多协议支持**
 - Claude Messages API (`/v1/messages`)
 - OpenAI Chat Completions API (`/v1/chat/completions`)
 - Gemini Native API (`/v1beta/models/*:generateContent`)
 
-🚀 **Seamless Integration**
-- Compatible with Claude CLI
-- Compatible with OpenAI SDK
-- Streaming response support
-- Function calling support
+🚀 **无缝集成**
+- 兼容 Claude CLI
+- 兼容 OpenAI SDK
+- 支持流式响应
+- 支持工具调用（Function Calling）
 
-🎯 **Real Integration Testing**
-- End-to-end integration tests
-- Real API call validation
-- Token usage statistics
+🎯 **真实测试**
+- 端到端集成测试
+- 真实 API 调用验证
+- Token 使用统计
 
-## Quick Start
+## 快速开始
 
-### 1. Install Dependencies
+### 1. 安装依赖
 
 ```bash
 cd /mnt/c/Work/mcp/gemini-cli
@@ -32,30 +30,30 @@ npm install
 npm run build --workspaces
 ```
 
-### 2. Start Server
+### 2. 启动服务
 
 ```bash
 cd packages/a2a-server
 USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
 ```
 
-Wait approximately **30 seconds** for the server to start.
+等待约 **30 秒** 直到服务启动完成。
 
-### 3. Use Claude CLI with Gemini
+### 3. 使用 Claude CLI 调用 Gemini
 
-**Switch to Gemini**:
+**切换到 Gemini**：
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:41242
 claude --model gemini-2.5-pro "Hello, Gemini!"
 ```
 
-**Restore Claude**:
+**恢复 Claude**：
 ```bash
 unset ANTHROPIC_BASE_URL
 claude --model sonnet "Hello, Claude!"
 ```
 
-## API Endpoints
+## API 端点
 
 ### Claude Messages API
 
@@ -71,7 +69,7 @@ curl http://localhost:41242/v1/messages \
   }'
 ```
 
-**Streaming Response**:
+**流式响应**：
 ```bash
 curl http://localhost:41242/v1/messages \
   -H "Content-Type: application/json" \
@@ -110,9 +108,9 @@ curl http://localhost:41242/v1beta/models/gemini-2.5-pro:generateContent \
   }'
 ```
 
-## Function Calling
+## 工具调用（Function Calling）
 
-### Claude Format
+### Claude 格式
 
 ```json
 {
@@ -134,7 +132,7 @@ curl http://localhost:41242/v1beta/models/gemini-2.5-pro:generateContent \
 }
 ```
 
-### OpenAI Format
+### OpenAI 格式
 
 ```json
 {
@@ -159,9 +157,9 @@ curl http://localhost:41242/v1beta/models/gemini-2.5-pro:generateContent \
 }
 ```
 
-## Working Directory Support
+## 工作目录支持
 
-Specify working directory via `X-Working-Directory` header:
+通过 `X-Working-Directory` header 指定工作目录：
 
 ```bash
 curl http://localhost:41242/v1/messages \
@@ -170,146 +168,146 @@ curl http://localhost:41242/v1/messages \
   -d '{...}'
 ```
 
-Claude Code automatically passes this header.
+Claude Code 会自动传递此 header。
 
-## Running Tests
+## 运行测试
 
-### Method 1: Auto-start Server
+### 方式 1：自动启动服务器
 
 ```bash
 cd packages/a2a-server
 npx vitest run src/http/claudeProxy.test.ts --no-coverage --silent=false
 ```
 
-### Method 2: Use Existing Server (Recommended)
+### 方式 2：使用已启动的服务器（推荐）
 
-**Terminal 1 - Start Server**:
+**终端 1 - 启动服务器**：
 ```bash
 cd packages/a2a-server
 USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
 ```
 
-**Terminal 2 - Run Tests**:
+**终端 2 - 运行测试**：
 ```bash
 cd packages/a2a-server
 USE_EXISTING_SERVER=1 npx vitest run src/http/*.test.ts --no-coverage --silent=false
 ```
 
-See detailed test guide: [TEST_GUIDE.md](packages/a2a-server/TEST_GUIDE.md)
+查看详细测试指南：[TEST_GUIDE.md](packages/a2a-server/TEST_GUIDE.md)
 
-## Test Coverage
+## 测试覆盖
 
-### claudeProxy.test.ts (6 tests)
-- ✅ Non-streaming messages
-- ✅ Streaming messages
-- ✅ System prompts
-- ✅ Streaming tool calls
+### claudeProxy.test.ts（6 个测试）
+- ✅ 非流式消息
+- ✅ 流式消息
+- ✅ 系统提示
+- ✅ 流式工具调用
 - ✅ X-Working-Directory header
-- ✅ 128KB large payload
+- ✅ 128KB 大负载
 
-### openaiProxy.test.ts (5 tests)
-- ✅ Multi-turn conversation with context
-- ✅ System message handling
-- ✅ Tool calling support
-- ✅ Tool result handling
-- ✅ Parallel tool calls
+### openaiProxy.test.ts（5 个测试）
+- ✅ 多轮对话保持上下文
+- ✅ 系统消息处理
+- ✅ 工具调用支持
+- ✅ 工具结果处理
+- ✅ 并行工具调用
 
-### geminiProxy.test.ts (6 tests)
-- ✅ Basic generateContent
-- ✅ Multi-turn conversation
+### geminiProxy.test.ts（6 个测试）
+- ✅ 基础 generateContent
+- ✅ 多轮对话
 - ✅ tools/functionDeclarations
-- ✅ functionResponse handling
-- ✅ systemInstruction support
-- ✅ 128KB large payload
+- ✅ functionResponse 处理
+- ✅ systemInstruction 支持
+- ✅ 128KB 大负载
 
-## Architecture
+## 架构说明
 
-### Core Components
+### 核心组件
 
 ```
 packages/a2a-server/src/http/
 ├── claudeProxy.ts       # Claude Messages API → Gemini
 ├── openaiProxy.ts       # OpenAI Chat API → Gemini
-├── geminiProxy.ts       # Gemini Native API (passthrough)
+├── geminiProxy.ts       # Gemini Native API (直通)
 └── adapters/
-    └── messageConverter.ts  # Message format conversion
+    └── messageConverter.ts  # 消息格式转换
 ```
 
-### Key Features
+### 关键特性
 
-**1. System Instruction Handling**
+**1. 系统指令处理**
 - Claude `system` → Gemini `systemInstruction`
 - OpenAI `system` role → Gemini `systemInstruction`
-- Passed as config parameter, not injected into contents
+- 作为 config 参数传递，不注入 contents
 
-**2. Tool Calling Mapping**
+**2. 工具调用映射**
 - Claude tools → Gemini functionDeclarations
 - OpenAI tools → Gemini functionDeclarations
-- Auto-cleanup of `$schema` and other meta fields
-- Multi-turn tool calling support
+- 自动清理 `$schema` 等元字段
+- 支持多轮工具调用
 
-**3. Streaming Response**
-- True streaming: previousText delta instead of accumulation
-- SSE format output
-- Tool call delta events
+**3. 流式响应**
+- 真流式：previousText delta 替代累积
+- SSE 格式输出
+- 工具调用增量事件
 
-**4. Thought Filtering**
-- Auto-filter thought parts to save context
-- If all parts filtered, keep original parts (remove thoughtSignature)
+**4. Thought 过滤**
+- 自动过滤 thought parts 节省 context
+- 如果过滤后为空，保留原始 parts（移除 thoughtSignature）
 
-**5. Large Payload Support**
-- Support 128KB+ input
-- `maxOutputTokens: 20000` ensures sufficient output space
-- Breakthrough 100KB string limit (fixed in 0.8.0)
+**5. 大负载支持**
+- 支持 128KB+ 输入
+- `maxOutputTokens: 20000` 确保足够输出空间
+- 突破 100KB 字符串限制（已在 0.8.0 修复）
 
-## Configuration
+## 配置
 
-### Environment Variables
+### 环境变量
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CODER_AGENT_PORT` | Server port | `41242` |
-| `USE_CCPA` | Use OAuth authentication | `1` |
-| `USE_EXISTING_SERVER` | Reuse running server for tests | - |
-| `VERBOSE` | Show detailed logs | - |
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CODER_AGENT_PORT` | 服务端口 | `41242` |
+| `USE_CCPA` | 使用 OAuth 认证 | `1` |
+| `USE_EXISTING_SERVER` | 测试时复用已启动服务器 | - |
+| `VERBOSE` | 显示详细日志 | - |
 
-### Supported Models
+### 支持的模型
 
 - `gemini-2.5-pro`
 - `gemini-2.5-flash`
 - `gemini-flash-latest`
 - `gemini-pro-latest`
 
-## Example: Claude CLI Workflow
+## 示例：Claude CLI 工作流
 
 ```bash
-# 1. Start proxy server
+# 1. 启动中转服务
 cd packages/a2a-server
 USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
 
-# 2. Configure Claude CLI to use proxy
+# 2. 配置 Claude CLI 使用中转服务
 export ANTHROPIC_BASE_URL=http://127.0.0.1:41242
 
-# 3. Use Gemini models
+# 3. 使用 Gemini 模型
 claude --model gemini-2.5-pro "Explain quantum computing"
 claude --model gemini-flash-latest /path/to/code "Review this code"
 
-# 4. Tool calling example
+# 4. 工具调用示例
 claude --model gemini-2.5-pro "What's the weather in Tokyo?"
 
-# 5. Restore Claude
+# 5. 恢复 Claude
 unset ANTHROPIC_BASE_URL
 claude --model sonnet "Hello Claude"
 ```
 
-## Example: OpenAI SDK
+## 示例：OpenAI SDK
 
 ```python
 import openai
 
 client = openai.OpenAI(
     base_url="http://127.0.0.1:41242/v1",
-    api_key="dummy"  # No real key needed
+    api_key="dummy"  # 不需要真实 key
 )
 
 response = client.chat.completions.create(
@@ -322,41 +320,41 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-## Token Usage Statistics
+## Token 使用统计
 
-Test output shows token usage:
+测试输出会显示 token 使用情况：
 
 ```
 📊 Tokens - Input: 4,965, Output: 12
-📊 Tokens - Input: 34,106, Output: 23  # 128KB payload
+📊 Tokens - Input: 34,106, Output: 23  # 128KB 负载
 ```
 
-## Troubleshooting
+## 故障排查
 
-### Port Conflict
+### 端口冲突
 ```bash
 lsof -ti:41242 | xargs kill -9
 ```
 
-### Slow Server Startup
-Wait approximately 30 seconds for OAuth authentication to load.
+### 服务启动慢
+等待约 30 秒加载 OAuth 认证。
 
-### Test Failures
-Run tests with existing server:
+### 测试失败
+使用已启动的服务器运行测试：
 ```bash
 USE_EXISTING_SERVER=1 npx vitest run src/http/*.test.ts
 ```
 
-## Version Info
+## 版本信息
 
 - **Base Version**: `@google/gemini-cli@0.8.0-preview.1`
-- **Modifications**:
-  - ✅ Claude/OpenAI → Gemini protocol conversion
-  - ✅ Real integration tests (removed Mocks)
-  - ✅ 128KB large payload support
-  - ✅ Thought filtering optimization
-  - ✅ Working directory passthrough
-  - ✅ Token statistics
+- **改造内容**:
+  - ✅ Claude/OpenAI → Gemini 协议转换
+  - ✅ 真实集成测试（移除 Mock）
+  - ✅ 128KB 大负载支持
+  - ✅ Thought 过滤优化
+  - ✅ 工作目录传递
+  - ✅ Token 统计
 
 ## License
 
