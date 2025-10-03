@@ -207,4 +207,36 @@ describe('Gemini - Native API', () => {
     expect(text).toMatch(/arr|ahoy|matey|ye|aye|4/);
     console.log('✅ systemInstruction applied correctly');
   });
+
+  test('should handle large payload (256KB)', async () => {
+    console.log('\n🔧 Testing 256KB payload handling...');
+
+    // Generate ~256KB text (262144 bytes)
+    const baseText = 'The quick brown fox jumps over the lazy dog. ';
+    const targetSize = 256 * 1024; // 256KB
+    const repetitions = Math.ceil(targetSize / baseText.length);
+    const largeText = baseText.repeat(repetitions).slice(0, targetSize);
+
+    const request = {
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: `Here is a large document:\n\n${largeText}\n\nSummarize this in one sentence.` }]
+        }
+      ],
+      generationConfig: {
+        maxOutputTokens: 100
+      }
+    };
+
+    const payloadSize = JSON.stringify(request).length;
+    console.log(`Payload size: ${(payloadSize / 1024).toFixed(2)} KB`);
+
+    const response = await POST('/v1beta/models/gemini-2.5-flash:generateContent', request);
+
+    expect(response.status).toBe(200);
+    expect(response.data.candidates[0].content.parts[0].text).toBeDefined();
+    console.log('✅ Large payload handled successfully');
+    console.log('Summary:', response.data.candidates[0].content.parts[0].text);
+  });
 });

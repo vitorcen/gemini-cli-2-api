@@ -92,22 +92,23 @@ export async function createApp() {
     );
 
     let expressApp = express();
+
+    // ✅ Set 100mb limit GLOBALLY before any routes or middleware
+    // This will be used by ALL routes (A2A + API proxy)
+    expressApp.use(express.json({ limit: '100mb' }));
+    expressApp.use(express.urlencoded({ limit: '100mb', extended: true }));
+
     expressApp.use((req, res, next) => {
       requestStorage.run({ req }, next);
     });
 
-    const appBuilder = new A2AExpressApp(requestHandler);
-    expressApp = appBuilder.setupRoutes(expressApp, '');
-
-    // Initialize a Config instance for API proxy endpoints.
-    // Requires env: set USE_CCPA=1 for Login with Google, or provide GEMINI_API_KEY.
+    // Mount API proxy routes
     try {
       const settings = loadSettings(process.cwd());
       const config = await loadConfig(settings, [], uuidv4());
 
       const apiProxyRouter = express.Router();
-      apiProxyRouter.use(express.json({ limit: '100mb' }));
-      apiProxyRouter.use(express.urlencoded({ limit: '100mb', extended: true }));
+      // ✅ No body-parser here - use global one
 
       registerOpenAIEndpoints(apiProxyRouter, config);
       registerGeminiEndpoints(apiProxyRouter, config);
@@ -116,11 +117,14 @@ export async function createApp() {
       expressApp.use('/', apiProxyRouter);
 
       logger.info('[CoreAgent] OpenAI-compatible endpoints mounted at /v1/chat/completions');
+      logger.info('[CoreAgent] Gemini-compatible endpoints mounted at /v1/messages');
       logger.info('[CoreAgent] Gemini-compatible endpoints mounted at /v1beta/models/*');
-      logger.info('[CoreAgent] Claude-compatible endpoints mounted at /v1/messages');
     } catch (e) {
       logger.warn('[CoreAgent] Skipping API proxy endpoints:', e);
     }
+
+    const appBuilder = new A2AExpressApp(requestHandler);
+    expressApp = appBuilder.setupRoutes(expressApp, '');
 
     expressApp.post('/tasks', async (req, res) => {
       try {
