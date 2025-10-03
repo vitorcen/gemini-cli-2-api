@@ -85,13 +85,23 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
 
   // Helper to filter out thought parts and thoughtSignature from response
   const filterThoughtParts = (parts: any[]): any[] => {
-    return parts
+    const filtered = parts
       .filter(p => !p.thought)  // 过滤 thought: true 的 parts
       .map(p => {
         // 从每个 part 中删除 thoughtSignature 字段
         const { thoughtSignature, ...rest } = p;
         return rest;
       });
+
+    // 如果过滤后为空，保留原始 parts（移除 thoughtSignature 但不过滤 thought）
+    if (filtered.length === 0 && parts.length > 0) {
+      return parts.map(p => {
+        const { thoughtSignature, ...rest } = p;
+        return rest;
+      });
+    }
+
+    return filtered;
   };
 
   // Non-streaming generateContent endpoint
