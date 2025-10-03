@@ -10,7 +10,12 @@ import type { Config } from '@google/gemini-cli-core';
 import { DEFAULT_GEMINI_FLASH_MODEL, StreamEventType, getResponseText } from '@google/gemini-cli-core';
 import type { StreamEvent } from '@google/gemini-cli-core';
 import type { GenerateContentResponse } from '@google/genai';
-import { convertOpenAIMessagesToGemini, type OpenAIMessage } from './adapters/messageConverter.js';
+import {
+  convertOpenAIMessagesToGemini,
+  convertOpenAIToolsToGemini,
+  type OpenAIMessage,
+  type OpenAITool
+} from './adapters/messageConverter.js';
 
 interface OpenAIChatCompletionsRequest {
   model?: string;
@@ -19,6 +24,8 @@ interface OpenAIChatCompletionsRequest {
   top_p?: number;
   max_tokens?: number;
   stream?: boolean;
+  tools?: OpenAITool[];
+  tool_choice?: 'none' | 'auto' | { type: 'function'; function: { name: string } };
 }
 
 export function registerOpenAIEndpoints(app: express.Router, config: Config) {
@@ -55,9 +62,14 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
           const lastMessage = contents[contents.length - 1]; // 最后一条是当前消息
 
           const chat = await config.getGeminiClient().startChat(history);
-          const promptId = uuidv4();
 
-          // 提取最后一条用户消息的文本
+          // 设置工具
+          const tools = body.tools ? convertOpenAIToolsToGemini(body.tools) : [];
+          if (tools.length > 0) {
+            chat.setTools(tools);
+          }
+
+          const promptId = uuidv4();
           const lastMessageText = lastMessage?.parts?.[0]?.text || '';
 
           const streamGen = await chat.sendMessageStream(
@@ -75,16 +87,29 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
 
           let accumulatedText = '';
           let firstChunk = true;
+          let hasFunctionCall = false;
+          let functionCallsData: any[] = [];
+
           for await (const chunk of streamGen as AsyncGenerator<StreamEvent>) {
             if (chunk.type === StreamEventType.RETRY) {
-              // Skip RETRY events in OpenAI protocol
               continue;
             }
             const chunkResp = chunk.value;
             const chunkText = getResponseText(chunkResp) ?? '';
 
-            if (chunkText.length > 0) {
-              // Send only the incremental delta text
+            // 检查是否有 functionCall - 支持并行调用
+            const parts = chunkResp.candidates?.[0]?.content?.parts || [];
+            const funcCalls = parts.filter(p => 'functionCall' in p && p.functionCall);
+
+            if (funcCalls.length > 0) {
+              hasFunctionCall = true;
+              functionCallsData = funcCalls.map(fc => ({
+                name: fc.functionCall!.name,
+                arguments: JSON.stringify(fc.functionCall!.args || {})
+              }));
+            }
+
+            if (chunkText.length > 0 && !hasFunctionCall) {
               const delta = chunkText.slice(accumulatedText.length);
               if (delta.length > 0) {
                 const payload = {
@@ -108,6 +133,32 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
               }
             }
           }
+
+          // 如果有函数调用，发送 tool_calls (支持并行调用)
+          if (hasFunctionCall && functionCallsData.length > 0) {
+            const toolCallPayload = {
+              id,
+              object: 'chat.completion.chunk',
+              created,
+              model,
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    tool_calls: functionCallsData.map((fc, idx) => ({
+                      index: idx,
+                      id: `call_${uuidv4()}`,
+                      type: 'function' as const,
+                      function: fc
+                    }))
+                  },
+                  finish_reason: null,
+                },
+              ],
+            };
+            res.write(`data: ${JSON.stringify(toolCallPayload)}\n\n`);
+          }
+
           // Final stop chunk
           const stopPayload = {
             id,
@@ -115,7 +166,7 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
             created,
             model,
             choices: [
-              { index: 0, delta: {}, finish_reason: 'stop' },
+              { index: 0, delta: {}, finish_reason: hasFunctionCall ? 'tool_calls' : 'stop' },
             ],
           };
           res.write(`data: ${JSON.stringify(stopPayload)}\n\n`);
@@ -132,19 +183,57 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
         return;
       }
 
-      // ✅ Non-streaming path - 使用完整对话历史
-      const response: GenerateContentResponse = await config
-        .getGeminiClient()
-        .generateContent(
-          contents,
-          {
-            temperature,
-            topP,
-            maxOutputTokens,
-          },
-          new AbortController().signal,
+      // ✅ Non-streaming path - 使用完整对话历史和工具
+      const tools = body.tools ? convertOpenAIToolsToGemini(body.tools) : [];
+
+      let response: GenerateContentResponse;
+
+      if (tools.length > 0) {
+        // 有工具时必须使用 chat 方式
+        const history = contents.slice(0, -1);
+        const lastMessage = contents[contents.length - 1];
+        const chat = await config.getGeminiClient().startChat(history);
+        chat.setTools(tools);
+
+        const lastMessageText = lastMessage?.parts?.[0]?.text || '';
+
+        // 使用流式API但只取最后结果 (GeminiChat没有同步方法)
+        const streamGen = await chat.sendMessageStream(
           model,
+          {
+            message: lastMessageText,
+            config: {
+              temperature,
+              topP,
+              maxOutputTokens,
+            },
+          },
+          uuidv4()
         );
+
+        // 收集完整响应
+        let lastResp: GenerateContentResponse | null = null;
+        for await (const chunk of streamGen as AsyncGenerator<StreamEvent>) {
+          if (chunk.type !== StreamEventType.RETRY) {
+            lastResp = chunk.value;
+          }
+        }
+        response = lastResp!;
+      } else {
+        // 无工具时直接调用
+        response = await config
+          .getGeminiClient()
+          .generateContent(
+            contents,
+            {
+              temperature,
+              topP,
+              maxOutputTokens,
+            },
+            new AbortController().signal,
+            model
+          );
+      }
 
       const text = getResponseText(response) ?? '';
       type WithUsage = {
@@ -163,6 +252,28 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
           }
         : undefined;
 
+      // 检查是否有 functionCall - 支持并行调用
+      const firstCandidate = response.candidates?.[0];
+      const parts = firstCandidate?.content?.parts || [];
+      const functionCalls = parts.filter(p => 'functionCall' in p && p.functionCall);
+
+      let finishReason: 'stop' | 'tool_calls' = 'stop';
+      let toolCalls: any[] | undefined;
+      let messageContent: string | null = text;
+
+      if (functionCalls.length > 0) {
+        finishReason = 'tool_calls';
+        messageContent = null;  // OpenAI 规范：有 tool_calls 时 content 为 null
+        toolCalls = functionCalls.map(fc => ({
+          id: `call_${uuidv4()}`,
+          type: 'function',
+          function: {
+            name: fc.functionCall!.name,
+            arguments: JSON.stringify(fc.functionCall!.args || {})
+          }
+        }));
+      }
+
       const result = {
         id,
         object: 'chat.completion',
@@ -171,8 +282,12 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
         choices: [
           {
             index: 0,
-            message: { role: 'assistant', content: text },
-            finish_reason: 'stop',
+            message: {
+              role: 'assistant',
+              content: messageContent,
+              ...(toolCalls && { tool_calls: toolCalls })
+            },
+            finish_reason: finishReason,
           },
         ],
         usage: usageMapped,

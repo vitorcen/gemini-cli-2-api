@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Tool, FunctionDeclaration } from '@google/genai';
 
 export interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -20,6 +20,15 @@ export interface OpenAIMessage {
   tool_call_id?: string;
 }
 
+export interface OpenAITool {
+  type: 'function';
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, any>;
+  };
+}
+
 /**
  * 将 OpenAI 消息格式转换为 Gemini Contents 格式
  *
@@ -30,6 +39,9 @@ export function convertOpenAIMessagesToGemini(
 ): { contents: Content[]; systemInstruction?: string } {
   const contents: Content[] = [];
   let systemInstruction = '';
+
+  // 维护 tool_call_id -> function_name 映射
+  const toolCallMap = new Map<string, string>();
 
   for (const msg of messages) {
     if (msg.role === 'system') {
@@ -52,8 +64,10 @@ export function convertOpenAIMessagesToGemini(
           parts.push({ text: msg.content });
         }
 
-        // 添加工具调用
+        // 添加工具调用并记录映射
         for (const toolCall of msg.tool_calls) {
+          toolCallMap.set(toolCall.id, toolCall.function.name);
+
           parts.push({
             functionCall: {
               name: toolCall.function.name,
@@ -69,19 +83,19 @@ export function convertOpenAIMessagesToGemini(
       } else {
         // 普通文本回复
         contents.push({
-          role: 'model',  // Gemini 使用 'model' 而非 'assistant'
+          role: 'model',
           parts: [{ text: msg.content || '' }]
         });
       }
     } else if (msg.role === 'tool') {
-      // 工具调用结果
-      // 注意：需要找到对应的 functionCall 名称
-      // 这里简化处理，实际应该维护一个 tool_call_id -> function_name 的映射
+      // 工具调用结果 - 使用映射表查找函数名
+      const functionName = msg.tool_call_id ? toolCallMap.get(msg.tool_call_id) : undefined;
+
       contents.push({
         role: 'user',
         parts: [{
           functionResponse: {
-            name: 'unknown',  // TODO: 需要从上下文中查找
+            name: functionName || 'unknown',
             response: {
               result: msg.content || ''
             }
@@ -95,6 +109,23 @@ export function convertOpenAIMessagesToGemini(
     contents,
     systemInstruction: systemInstruction.trim() || undefined
   };
+}
+
+/**
+ * 将 OpenAI tools 转换为 Gemini functionDeclarations
+ */
+export function convertOpenAIToolsToGemini(tools: OpenAITool[]): Tool[] {
+  if (!tools || tools.length === 0) {
+    return [];
+  }
+
+  const functionDeclarations: FunctionDeclaration[] = tools.map(tool => ({
+    name: tool.function.name,
+    description: tool.function.description || '',
+    parameters: tool.function.parameters
+  }));
+
+  return [{ functionDeclarations }];
 }
 
 /**
