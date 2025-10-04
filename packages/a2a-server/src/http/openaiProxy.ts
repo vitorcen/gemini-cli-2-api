@@ -7,9 +7,7 @@
 import type express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
-import { DEFAULT_GEMINI_FLASH_MODEL, StreamEventType, getResponseText } from '@google/gemini-cli-core';
-import type { StreamEvent } from '@google/gemini-cli-core';
-import type { GenerateContentResponse } from '@google/genai';
+import { DEFAULT_GEMINI_FLASH_MODEL, getResponseText } from '@google/gemini-cli-core';
 import {
   convertOpenAIMessagesToGemini,
   convertOpenAIToolsToGemini,
@@ -57,32 +55,19 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
         res.flushHeaders && res.flushHeaders();
 
         try {
-          // ✅ 使用完整对话历史启动多轮对话
-          const history = contents.slice(0, -1); // 除最后一条外都是历史
-          const lastMessage = contents[contents.length - 1]; // 最后一条是当前消息
-
-          const chat = await config.getGeminiClient().startChat(history);
-
-          // 设置工具
+          // Use rawGenerateContentStream to bypass system prompt injection
           const tools = body.tools ? convertOpenAIToolsToGemini(body.tools) : [];
-          if (tools.length > 0) {
-            chat.setTools(tools);
-          }
 
-          const promptId = uuidv4();
-          const lastMessageText = lastMessage?.parts?.[0]?.text || '';
-
-          const streamGen = await chat.sendMessageStream(
-            model,
+          const streamGen = await config.getGeminiClient().rawGenerateContentStream(
+            contents,
             {
-              message: lastMessageText,
-              config: {
-                temperature,
-                topP,
-                maxOutputTokens,
-              },
+              temperature,
+              topP,
+              maxOutputTokens,
+              ...(tools.length > 0 && { tools }),
             },
-            promptId,
+            new AbortController().signal,
+            model,
           );
 
           let accumulatedText = '';
@@ -90,15 +75,9 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
           let hasFunctionCall = false;
           let functionCallsData: any[] = [];
 
-          for await (const chunk of streamGen as AsyncGenerator<StreamEvent>) {
-            if (chunk.type === StreamEventType.RETRY) {
-              continue;
-            }
-            const chunkResp = chunk.value;
-            const chunkText = getResponseText(chunkResp) ?? '';
-
-            // 检查是否有 functionCall - 支持并行调用
-            const parts = chunkResp.candidates?.[0]?.content?.parts || [];
+          for await (const chunk of streamGen) {
+            // Check for function calls first
+            const parts = chunk.candidates?.[0]?.content?.parts || [];
             const funcCalls = parts.filter(p => 'functionCall' in p && p.functionCall);
 
             if (funcCalls.length > 0) {
@@ -109,8 +88,25 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
               }));
             }
 
-            if (chunkText.length > 0 && !hasFunctionCall) {
-              const delta = chunkText.slice(accumulatedText.length);
+            // Extract text from this chunk's parts
+            const textParts = parts.filter(p => p.text && !('functionCall' in p));
+            if (textParts.length > 0 && !hasFunctionCall) {
+              // Gemini may send cumulative or incremental text, so we need to handle both
+              const currentFullText = textParts.map(p => p.text).join('');
+
+              // Calculate delta: if current text is longer than accumulated, it's cumulative
+              // Otherwise, it's a new chunk we should add
+              let delta = '';
+              if (currentFullText.length > accumulatedText.length && currentFullText.startsWith(accumulatedText)) {
+                // Cumulative: extract the new portion
+                delta = currentFullText.slice(accumulatedText.length);
+                accumulatedText = currentFullText;
+              } else if (currentFullText.length > 0) {
+                // Incremental: use as-is
+                delta = currentFullText;
+                accumulatedText += currentFullText;
+              }
+
               if (delta.length > 0) {
                 const payload = {
                   id,
@@ -130,7 +126,6 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
                 res.write(`data: ${JSON.stringify(payload)}\n\n`);
                 // @ts-ignore
                 res.flush && res.flush();
-                accumulatedText += delta;
                 firstChunk = false;
               }
             }
@@ -189,57 +184,22 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
         return;
       }
 
-      // ✅ Non-streaming path - 使用完整对话历史和工具
+      // Non-streaming path - Use rawGenerateContent to bypass system prompt injection
       const tools = body.tools ? convertOpenAIToolsToGemini(body.tools) : [];
 
-      let response: GenerateContentResponse;
-
-      if (tools.length > 0) {
-        // 有工具时必须使用 chat 方式
-        const history = contents.slice(0, -1);
-        const lastMessage = contents[contents.length - 1];
-        const chat = await config.getGeminiClient().startChat(history);
-        chat.setTools(tools);
-
-        const lastMessageText = lastMessage?.parts?.[0]?.text || '';
-
-        // 使用流式API但只取最后结果 (GeminiChat没有同步方法)
-        const streamGen = await chat.sendMessageStream(
-          model,
+      const response = await config
+        .getGeminiClient()
+        .rawGenerateContent(
+          contents,
           {
-            message: lastMessageText,
-            config: {
-              temperature,
-              topP,
-              maxOutputTokens,
-            },
+            temperature,
+            topP,
+            maxOutputTokens,
+            ...(tools.length > 0 && { tools }),
           },
-          uuidv4()
+          new AbortController().signal,
+          model
         );
-
-        // 收集完整响应
-        let lastResp: GenerateContentResponse | null = null;
-        for await (const chunk of streamGen as AsyncGenerator<StreamEvent>) {
-          if (chunk.type !== StreamEventType.RETRY) {
-            lastResp = chunk.value;
-          }
-        }
-        response = lastResp!;
-      } else {
-        // 无工具时直接调用
-        response = await config
-          .getGeminiClient()
-          .generateContent(
-            contents,
-            {
-              temperature,
-              topP,
-              maxOutputTokens,
-            },
-            new AbortController().signal,
-            model
-          );
-      }
 
       const text = getResponseText(response) ?? '';
       type WithUsage = {

@@ -649,6 +649,94 @@ export class GeminiClient {
     }
   }
 
+  /**
+   * Raw generateContent without injecting core system prompt or environment context.
+   * For use in API proxy scenarios where the caller provides their own system instruction.
+   */
+  async rawGenerateContent(
+    contents: Content[],
+    generationConfig: GenerateContentConfig,
+    abortSignal: AbortSignal,
+    model: string,
+  ): Promise<GenerateContentResponse> {
+    const requestConfig: GenerateContentConfig = {
+      abortSignal,
+      ...generationConfig,
+    };
+
+    try {
+      return await this.getContentGeneratorOrFail().generateContent(
+        {
+          model,
+          config: requestConfig,
+          contents,
+        },
+        this.lastPromptId,
+      );
+    } catch (error: unknown) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
+
+      await reportError(
+        error,
+        `Error generating raw content via API with model ${model}.`,
+        {
+          requestContents: contents,
+          requestConfig,
+        },
+        'rawGenerateContent-api',
+      );
+      throw new Error(
+        `Failed to generate raw content with model ${model}: ${getErrorMessage(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Raw generateContentStream without injecting core system prompt or environment context.
+   * For use in API proxy scenarios where the caller provides their own system instruction.
+   */
+  async rawGenerateContentStream(
+    contents: Content[],
+    generationConfig: GenerateContentConfig,
+    abortSignal: AbortSignal,
+    model: string,
+  ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const requestConfig: GenerateContentConfig = {
+      abortSignal,
+      ...generationConfig,
+    };
+
+    try {
+      return await this.getContentGeneratorOrFail().generateContentStream(
+        {
+          model,
+          config: requestConfig,
+          contents,
+        },
+        this.lastPromptId,
+      );
+    } catch (error: unknown) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
+
+      await reportError(
+        error,
+        `Error generating raw content stream via API with model ${model}.`,
+        {
+          requestContents: contents,
+          requestConfig,
+        },
+        'rawGenerateContentStream-api',
+      );
+      throw new Error(
+        `Failed to generate raw content stream with model ${model}: ${getErrorMessage(error)}`,
+      );
+    }
+  }
+
   async tryCompressChat(
     prompt_id: string,
     force: boolean = false,

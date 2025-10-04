@@ -7,8 +7,7 @@
 import type express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
-import { DEFAULT_GEMINI_FLASH_MODEL, StreamEventType } from '@google/gemini-cli-core';
-import type { StreamEvent } from '@google/gemini-cli-core';
+import { DEFAULT_GEMINI_FLASH_MODEL } from '@google/gemini-cli-core';
 import type { Content } from '@google/genai';
 
 interface ClaudeContentBlock {
@@ -82,6 +81,7 @@ function cleanSchema(schema: any): any {
 /**
  * Filter out thought parts and thoughtSignature from response to save context space
  */
+
 function filterThoughtParts(parts: any[]): any[] {
   return parts
     .filter(p => !p.thought)  // 过滤 thought: true 的 parts
@@ -193,34 +193,23 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
         res.flushHeaders && res.flushHeaders();
 
         try {
-          const lastUserMessage = contents.pop();
-          if (!lastUserMessage) {
-            throw new Error('No user message found');
-          }
-          const history = contents;
-
-
-
-          const chat = await config.getGeminiClient().startChat(history);
-          if (tools) {
-            chat.setTools(tools);
-          }
-          const promptId = uuidv4();
-          const streamGen = await chat.sendMessageStream(
-            model,
+          // Use CCPA mode with rawGenerateContentStream
+          const streamGen = await config.getGeminiClient().rawGenerateContentStream(
+            contents,
             {
-              message: lastUserMessage.parts?.[0]?.text || '',
-              config: {
-                temperature,
-                topP,
-                maxOutputTokens,
-                ...(systemInstruction && { systemInstruction }),
-              },
+              temperature,
+              topP,
+              maxOutputTokens,
+              ...(tools && { tools }),
+              ...(systemInstruction && { systemInstruction }),
             },
-            promptId,
+            new AbortController().signal,
+            model,
           );
 
           let outputTokens = 0;
+          let inputTokens = 0;
+          let firstChunk = true;
 
           const writeEvent = (event: string, data: object) => {
             res.write(`event: ${event}\n`);
@@ -228,19 +217,6 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
           };
 
           const messageId = `msg_${uuidv4()}`;
-          writeEvent('message_start', {
-            type: 'message_start',
-            message: {
-              id: messageId,
-              type: 'message',
-              role: 'assistant',
-              model,
-              content: [],
-              stop_reason: null,
-              stop_sequence: null,
-              usage: { input_tokens: 0, output_tokens: 0 },
-            },
-          });
 
           let currentBlockType: 'text' | 'tool_use' | null = null;
           let currentContentIndex = -1;
@@ -266,30 +242,69 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
             });
           };
 
-          let previousText = '';
-          for await (const chunk of streamGen as AsyncGenerator<StreamEvent>) {
-            if (chunk.type === StreamEventType.RETRY) continue;
+          let accumulatedText = '';
+          let messageStartSent = false;
 
-            const chunkResp = chunk.value;
+          for await (const chunkResp of streamGen) {
+            // Update input tokens if available
+            const currentInputTokens = (chunkResp as any).usageMetadata?.promptTokenCount;
+            if (currentInputTokens) {
+              inputTokens = currentInputTokens;
+            }
+
+            // Send message_start on first chunk (with whatever token info we have)
+            if (!messageStartSent && firstChunk) {
+              messageStartSent = true;
+              firstChunk = false;
+
+              writeEvent('message_start', {
+                type: 'message_start',
+                message: {
+                  id: messageId,
+                  type: 'message',
+                  role: 'assistant',
+                  model,
+                  content: [],
+                  stop_reason: null,
+                  stop_sequence: null,
+                  usage: { input_tokens: inputTokens, output_tokens: 0 },
+                },
+              });
+            }
+
+            // Update output tokens count if available
+            outputTokens = (chunkResp as any).usageMetadata?.candidatesTokenCount || outputTokens;
 
             // Filter thought parts from chunk
             const rawParts = chunkResp.candidates?.[0]?.content?.parts || [];
             const filteredParts = filterThoughtParts(rawParts);
 
-            // Extract text only from non-thought, non-function parts
+            // Extract text from this chunk's parts
             const textParts = filteredParts.filter((p: any) => p.text && !p.functionCall);
-            const currentText = textParts.map((p: any) => p.text).join('');
+            if (textParts.length > 0) {
+              // Gemini may send cumulative or incremental text
+              const currentFullText = textParts.map((p: any) => p.text).join('');
 
-            const textDelta = currentText.substring(previousText.length);
-            previousText = currentText;
+              // Calculate delta: if current text is longer than accumulated, it's cumulative
+              let delta = '';
+              if (currentFullText.length > accumulatedText.length && currentFullText.startsWith(accumulatedText)) {
+                // Cumulative: extract the new portion
+                delta = currentFullText.slice(accumulatedText.length);
+                accumulatedText = currentFullText;
+              } else if (currentFullText.length > 0) {
+                // Incremental: use as-is
+                delta = currentFullText;
+                accumulatedText += currentFullText;
+              }
 
-            if (textDelta) {
-              startTextBlock();
-              writeEvent('content_block_delta', {
-                type: 'content_block_delta',
-                index: currentContentIndex,
-                delta: { type: 'text_delta', text: textDelta },
-              });
+              if (delta.length > 0) {
+                startTextBlock();
+                writeEvent('content_block_delta', {
+                  type: 'content_block_delta',
+                  index: currentContentIndex,
+                  delta: { type: 'text_delta', text: delta },
+                });
+              }
             }
 
             // Ideal path: Handle structured function calls from the model
@@ -345,26 +360,19 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
           return res.end();
         }
       } else {
-        // Non-streaming response
-          const lastMessage = contents.pop();
-          if (!lastMessage) {
-            return res.status(400).json({ error: 'No message to process' });
-          }
-          const history = contents;
-
-
-          const response = await config.getGeminiClient().generateContent(
-            [...history, lastMessage],
-            {
-              temperature,
-              topP,
-              maxOutputTokens,
-              ...(tools && { tools }),
-              ...(systemInstruction && { systemInstruction }),
-            },
-            new AbortController().signal,
-            model,
-          );
+        // Non-streaming response - Using CCPA mode with rawGenerateContent
+        const response = await config.getGeminiClient().rawGenerateContent(
+          contents,
+          {
+            temperature,
+            topP,
+            maxOutputTokens,
+            ...(tools && { tools }),
+            ...(systemInstruction && { systemInstruction }),
+          },
+          new AbortController().signal,
+          model,
+        );
 
         const usage = (response as any).usageMetadata;
         const content: any[] = [];

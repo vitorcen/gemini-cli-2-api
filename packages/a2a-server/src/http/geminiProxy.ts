@@ -5,7 +5,6 @@
  */
 
 import type express from 'express';
-import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 
@@ -119,9 +118,10 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       const topP = body.generationConfig?.topP;
       const maxOutputTokens = body.generationConfig?.maxOutputTokens;
 
+      // Use rawGenerateContent to bypass system prompt injection
       const response = await config
         .getGeminiClient()
-        .generateContent(
+        .rawGenerateContent(
           contents,
           {
             temperature,
@@ -188,47 +188,29 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
         res.flushHeaders && res.flushHeaders();
 
         try {
-          // ✅ 使用完整对话历史启动 chat (如果有多轮对话)
-          const history = contents.length > 1 ? contents.slice(0, -1) : [];
-          const lastMessage = contents[contents.length - 1];
-
-          const chat = await config.getGeminiClient().startChat(history);
-
-          // ✅ 设置工具和系统指令
-          if (tools.length > 0) {
-            chat.setTools(tools);
-          }
-
-          const promptId = uuidv4();
-          const lastMessageText = lastMessage?.parts?.[0]?.text || '';
-
-          const streamGen = await chat.sendMessageStream(
-            model,
+          // Use rawGenerateContentStream to bypass system prompt injection
+          const streamGen = await config.getGeminiClient().rawGenerateContentStream(
+            contents,
             {
-              message: lastMessageText,
-              config: {
-                temperature,
-                topP,
-                maxOutputTokens,
-                ...(systemInstruction && { systemInstruction }),
-              },
+              temperature,
+              topP,
+              maxOutputTokens,
+              ...(tools.length > 0 && { tools }),
+              ...(systemInstruction && { systemInstruction }),
             },
-            promptId,
+            new AbortController().signal,
+            model,
           );
 
           let usageMetadata: GeminiUsageMetadata | undefined;
 
           for await (const chunk of streamGen) {
-            // ✅ 直接传递 Gemini 原生响应块 (支持 functionCall)
-            const data = (chunk as Record<string, any>)?.['type'] === 'chunk' && (chunk as Record<string, any>)?.['value']
-              ? (chunk as Record<string, any>)['value']
-              : chunk;
-
-            const candidates = (data as Record<string, any>)?.['candidates'];
+            // rawGenerateContentStream returns direct response objects
+            const candidates = chunk.candidates;
 
             if (candidates && candidates.length > 0) {
               // Update usage metadata if available
-              const chunkUsage = (data as Record<string, any>)?.['usageMetadata'] as GeminiUsageMetadata | undefined;
+              const chunkUsage = (chunk as any).usageMetadata as GeminiUsageMetadata | undefined;
               if (chunkUsage) {
                 usageMetadata = {
                   promptTokenCount: chunkUsage.promptTokenCount || 0,
@@ -239,17 +221,27 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
 
               // ✅ 直接返回原生格式 (包括 parts 中的 functionCall)，过滤 thought
               const response: GeminiResponse = {
-                candidates: candidates.map((candidate: any, index: number) => ({
-                  content: {
-                    ...candidate.content,
-                    parts: filterThoughtParts(candidate.content?.parts || [])
-                  } as GeminiContent,
-                  finishReason: candidate.finishReason || '',
-                  index,
-                  safetyRatings: candidate.safetyRatings
-                })),
+                candidates: candidates.map((candidate: any, index: number) => {
+                  const rawParts = candidate.content?.parts || [];
+                  const filteredParts = filterThoughtParts(rawParts);
+
+                  return {
+                    content: {
+                      ...candidate.content,
+                      parts: filteredParts
+                    } as GeminiContent,
+                    finishReason: candidate.finishReason || '',
+                    index,
+                    safetyRatings: candidate.safetyRatings
+                  };
+                }),
                 usageMetadata,
               };
+
+              // Only send chunks with actual content
+              if (response.candidates[0]?.content?.parts?.length === 0) {
+                continue;
+              }
 
               res.write(`data: ${JSON.stringify(response)}\n\n`);
               // @ts-ignore
@@ -273,10 +265,10 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
         }
       } else {
         // Non-SSE streaming (return full response)
-        // ✅ 使用相同的原生结构逻辑
+        // Use rawGenerateContent to bypass system prompt injection
         const response = await config
           .getGeminiClient()
-          .generateContent(
+          .rawGenerateContent(
             contents,
             {
               temperature,
