@@ -7,7 +7,7 @@
 import type express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
-import { DEFAULT_GEMINI_FLASH_MODEL } from '@google/gemini-cli-core';
+import { DEFAULT_GEMINI_FLASH_MODEL, DEFAULT_GEMINI_MODEL } from '@google/gemini-cli-core';
 import type { Content } from '@google/genai';
 
 interface ClaudeContentBlock {
@@ -79,6 +79,34 @@ function cleanSchema(schema: any): any {
 }
 
 /**
+ * Map Claude model names to Gemini model names
+ */
+function mapModelName(requestedModel: string | undefined): string {
+  if (!requestedModel) return DEFAULT_GEMINI_FLASH_MODEL;
+
+  const lowerModel = requestedModel.toLowerCase();
+
+  // Models containing "sonnet" or "opus" -> DEFAULT_GEMINI_MODEL
+  if (lowerModel.includes('sonnet') || lowerModel.includes('opus')) {
+    return DEFAULT_GEMINI_MODEL;
+  }
+
+  // Models containing "haiku" -> DEFAULT_GEMINI_FLASH_MODEL
+  // Claude code auto req the Kaiku model based on user input to determine if it's a new topic and extract a title
+  if (lowerModel.includes('haiku')) {
+    return DEFAULT_GEMINI_FLASH_MODEL;
+  }
+
+  // Other claude-* models -> flash
+  if (requestedModel.startsWith('claude-')) {
+    return DEFAULT_GEMINI_FLASH_MODEL;
+  }
+
+  // Pass through everything else (gemini-*, gpt-*, etc.)
+  return requestedModel;
+}
+
+/**
  * Filter out thought parts and thoughtSignature from response to save context space
  */
 
@@ -98,7 +126,7 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
     try {
       const body = req.body as ClaudeRequest;
       const stream = Boolean(body.stream);
-      const model = body.model || DEFAULT_GEMINI_FLASH_MODEL;
+      const model = mapModelName(body.model);
 
       // Check for X-Working-Directory header to support per-request working directory
       const workingDirectory = req.headers['x-working-directory'] as string | undefined;
