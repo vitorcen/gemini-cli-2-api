@@ -34,7 +34,7 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
       const model = body.model || DEFAULT_GEMINI_FLASH_MODEL;
       const stream = Boolean(body.stream);
 
-      // ✅ 使用转换器保留完整对话历史
+      // ✅ Use converter to preserve complete conversation history
       const { contents } = convertOpenAIMessagesToGemini(body.messages || []);
 
       // Map OpenAI params to Gemini
@@ -131,7 +131,7 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
             }
           }
 
-          // 如果有函数调用，发送 tool_calls (支持并行调用)
+          // If there are function calls, send tool_calls (supports parallel calls)
           if (hasFunctionCall && functionCallsData.length > 0) {
             const toolCallPayload = {
               id,
@@ -218,7 +218,7 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
           }
         : undefined;
 
-      // 检查是否有 functionCall - 支持并行调用
+      // Check if there are functionCalls - supports parallel calls
       const firstCandidate = response.candidates?.[0];
       const parts = firstCandidate?.content?.parts || [];
       const functionCalls = parts.filter(p => 'functionCall' in p && p.functionCall);
@@ -229,7 +229,7 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
 
       if (functionCalls.length > 0) {
         finishReason = 'tool_calls';
-        messageContent = null;  // OpenAI 规范：有 tool_calls 时 content 为 null
+        messageContent = null;  // OpenAI spec: content is null when tool_calls is present
         toolCalls = functionCalls.map(fc => ({
           id: `call_${uuidv4()}`,
           type: 'function',

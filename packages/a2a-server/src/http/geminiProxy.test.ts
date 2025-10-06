@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
 
-// 测试辅助函数
+// Test helper functions
 const BASE_URL = 'http://localhost:41242';
 
 interface HTTPResponse<T = any> {
@@ -31,11 +31,11 @@ async function POST<T = any>(
   };
 }
 
-// 服务器管理
+// Server management
 let serverProcess: ChildProcess | null = null;
 
 async function startServer() {
-  // 检查是否使用已有服务器
+  // Check if using existing server
   if (process.env['USE_EXISTING_SERVER'] === '1') {
     console.log('🔗 Using existing server on', BASE_URL);
     try {
@@ -76,10 +76,10 @@ async function startServer() {
     if (process.env['VERBOSE']) console.error('[Server Error]', message.trim());
   });
 
-  // 等待服务器启动（需要约 30 秒加载认证）
+  // Wait for server to start (needs about 30 seconds to load authentication)
   await new Promise((resolve) => setTimeout(resolve, 35000));
 
-  // 验证服务器
+  // Verify server
   try {
     const healthResponse = await fetch(BASE_URL);
     if (healthResponse.ok) {
@@ -134,7 +134,7 @@ describe('Gemini Native API', () => {
 
     const response = await POST('/v1beta/models/gemini-flash-latest:generateContent', request);
 
-    // 打印 token 使用情况
+    // Print token usage
     if (response.data.usageMetadata) {
       const usage = response.data.usageMetadata;
       console.log(`📊 Tokens - Input: ${usage.promptTokenCount}, Output: ${usage.candidatesTokenCount}, Total: ${usage.totalTokenCount}`);
@@ -149,7 +149,7 @@ describe('Gemini Native API', () => {
     expect(firstCandidate.content.role).toBe('model');
     expect(firstCandidate.content.parts).toBeDefined();
 
-    // 检查 parts 内容
+    // Check parts content
     if (firstCandidate.content.parts.length === 0) {
       console.log('⚠️  Empty parts array! Full response:', JSON.stringify(response.data, null, 2));
     }
@@ -376,7 +376,7 @@ describe('Gemini Native API', () => {
 
     const response = await POST('/v1beta/models/gemini-flash-latest:generateContent', request);
 
-    // 打印 token 使用情况
+    // Print token usage
     if (response.data.usageMetadata) {
       const usage = response.data.usageMetadata;
       console.log(`📊 Tokens - Input: ${usage.promptTokenCount}, Output: ${usage.candidatesTokenCount}, Total: ${usage.totalTokenCount}`);
@@ -440,7 +440,7 @@ describe('Gemini Native API', () => {
 
     const response = await POST('/v1beta/models/gemini-flash-latest:generateContent', request);
 
-    // 打印 token 使用情况
+    // Print token usage
     if (response.data.usageMetadata) {
       const usage = response.data.usageMetadata;
       console.log(`📊 Tokens - Input: ${usage.promptTokenCount}, Output: ${usage.candidatesTokenCount}, Total: ${usage.totalTokenCount}`);
@@ -451,7 +451,7 @@ describe('Gemini Native API', () => {
     expect(response.status).toBe(200);
     const text = response.data.candidates[0].content.parts[0].text.toLowerCase();
 
-    // 模型应该知道是雨天，建议带伞
+    // Model should know it's raining and suggest bringing an umbrella
     expect(text).toMatch(/yes|umbrella|rain/i);
     console.log('✅ Model correctly used function response context');
   });
@@ -474,7 +474,7 @@ describe('Gemini Native API', () => {
 
     const response = await POST('/v1beta/models/gemini-flash-latest:generateContent', request);
 
-    // 打印 token 使用情况
+    // Print token usage
     if (response.data.usageMetadata) {
       const usage = response.data.usageMetadata;
       console.log(`📊 Tokens - Input: ${usage.promptTokenCount}, Output: ${usage.candidatesTokenCount}, Total: ${usage.totalTokenCount}`);
@@ -485,7 +485,7 @@ describe('Gemini Native API', () => {
     expect(response.status).toBe(200);
     const text = response.data.candidates[0].content.parts[0].text.toLowerCase();
 
-    // 应该包含海盗用语或数字4
+    // Should contain pirate speak or the number 4
     expect(text).toMatch(/arr|ahoy|matey|ye|aye|4|four/);
     console.log('✅ systemInstruction applied correctly');
   });
@@ -516,7 +516,7 @@ describe('Gemini Native API', () => {
 
     const response = await POST('/v1beta/models/gemini-flash-latest:generateContent', request);
 
-    // 打印 token 使用情况
+    // Print token usage
     if (response.data.usageMetadata) {
       const usage = response.data.usageMetadata;
       console.log(`📊 Tokens - Input: ${usage.promptTokenCount}, Output: ${usage.candidatesTokenCount}, Total: ${usage.totalTokenCount}`);
@@ -530,7 +530,7 @@ describe('Gemini Native API', () => {
     console.log('Parts count:', candidate.content.parts.length);
     console.log('Parts content:', JSON.stringify(candidate.content.parts, null, 2));
 
-    // 检查 parts 是否为空
+    // Check if parts is empty
     if (candidate.content.parts.length === 0) {
       console.error('❌ Empty parts array!');
       console.error('Full response:', JSON.stringify(response.data, null, 2));

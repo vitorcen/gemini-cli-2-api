@@ -30,9 +30,9 @@ export interface OpenAITool {
 }
 
 /**
- * 将 OpenAI 消息格式转换为 Gemini Contents 格式
+ * Convert OpenAI message format to Gemini Contents format
  *
- * 核心原则：保持完整对话历史，不丢失信息
+ * Core principle: Maintain complete conversation history without losing information
  */
 export function convertOpenAIMessagesToGemini(
   messages: OpenAIMessage[]
@@ -40,31 +40,31 @@ export function convertOpenAIMessagesToGemini(
   const contents: Content[] = [];
   let systemInstruction = '';
 
-  // 维护 tool_call_id -> function_name 映射
+  // Maintain tool_call_id -> function_name mapping
   const toolCallMap = new Map<string, string>();
 
   for (const msg of messages) {
     if (msg.role === 'system') {
-      // 收集系统提示
+      // Collect system prompts
       systemInstruction += (msg.content || '') + '\n\n';
     } else if (msg.role === 'user') {
-      // 用户消息
+      // User message
       contents.push({
         role: 'user',
         parts: [{ text: msg.content || '' }]
       });
     } else if (msg.role === 'assistant') {
-      // ✅ 关键修复：保留 assistant 消息
+      // ✅ Critical fix: Preserve assistant messages
       if (msg.tool_calls && msg.tool_calls.length > 0) {
-        // Assistant 调用了工具
+        // Assistant called tools
         const parts = [];
 
-        // 如果有文本内容，先添加文本
+        // If there is text content, add text first
         if (msg.content) {
           parts.push({ text: msg.content });
         }
 
-        // 添加工具调用并记录映射
+        // Add tool calls and record mapping
         for (const toolCall of msg.tool_calls) {
           toolCallMap.set(toolCall.id, toolCall.function.name);
 
@@ -81,14 +81,14 @@ export function convertOpenAIMessagesToGemini(
           parts
         });
       } else {
-        // 普通文本回复
+        // Normal text response
         contents.push({
           role: 'model',
           parts: [{ text: msg.content || '' }]
         });
       }
     } else if (msg.role === 'tool') {
-      // 工具调用结果 - 使用映射表查找函数名
+      // Tool call result - Use mapping to find function name
       const functionName = msg.tool_call_id ? toolCallMap.get(msg.tool_call_id) : undefined;
 
       contents.push({
@@ -112,7 +112,7 @@ export function convertOpenAIMessagesToGemini(
 }
 
 /**
- * 将 OpenAI tools 转换为 Gemini functionDeclarations
+ * Convert OpenAI tools to Gemini functionDeclarations
  */
 export function convertOpenAIToolsToGemini(tools: OpenAITool[]): Tool[] {
   if (!tools || tools.length === 0) {
@@ -129,7 +129,7 @@ export function convertOpenAIToolsToGemini(tools: OpenAITool[]): Tool[] {
 }
 
 /**
- * 从 Gemini Contents 提取纯文本（用于调试）
+ * Extract plain text from Gemini Contents (for debugging)
  */
 export function extractTextFromContents(contents: Content[]): string {
   return contents

@@ -85,14 +85,14 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
   // Helper to filter out thought parts and thoughtSignature from response
   const filterThoughtParts = (parts: any[]): any[] => {
     const filtered = parts
-      .filter(p => !p.thought)  // 过滤 thought: true 的 parts
+      .filter(p => !p.thought)  // Filter parts with thought: true
       .map(p => {
-        // 从每个 part 中删除 thoughtSignature 字段
+        // Remove thoughtSignature field from each part
         const { thoughtSignature, ...rest } = p;
         return rest;
       });
 
-    // 如果过滤后为空，保留原始 parts（移除 thoughtSignature 但不过滤 thought）
+    // If filtered result is empty, keep original parts (remove thoughtSignature but don't filter thought)
     if (filtered.length === 0 && parts.length > 0) {
       return parts.map(p => {
         const { thoughtSignature, ...rest } = p;
@@ -109,7 +109,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       const body = req.body as GeminiRequest;
       const model = extractModel(req.path);
 
-      // ✅ 直接传递 Gemini 原生结构
+      // ✅ Pass Gemini native structure directly
       const contents = (body.contents || []) as Content[];
       const tools = convertTools(body.tools);
       const systemInstruction = body.systemInstruction;
@@ -134,7 +134,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
           model,
         );
 
-      // ✅ 直接返回 Gemini 原生响应格式
+      // ✅ Return Gemini native response format directly
       const usage = (response as GenerateContentResponse & { usageMetadata?: any }).usageMetadata;
 
       const result: GeminiResponse = {
@@ -170,7 +170,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       const model = extractModel(req.path);
       const useSSE = req.query['alt'] === 'sse';
 
-      // ✅ 直接传递 Gemini 原生结构
+      // ✅ Pass Gemini native structure directly
       const contents = (body.contents || []) as Content[];
       const tools = convertTools(body.tools);
       const systemInstruction = body.systemInstruction;
@@ -219,7 +219,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
                 };
               }
 
-              // ✅ 直接返回原生格式 (包括 parts 中的 functionCall)，过滤 thought
+              // ✅ Return native format directly (including functionCall in parts), filter thoughts
               const response: GeminiResponse = {
                 candidates: candidates.map((candidate: any, index: number) => {
                   const rawParts = candidate.content?.parts || [];

@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
 
-// 测试辅助函数
+// Test helper functions
 const BASE_URL = 'http://localhost:41242';
 
 interface HTTPResponse<T = any> {
@@ -31,11 +31,11 @@ async function POST<T = any>(
   };
 }
 
-// 服务器管理
+// Server management
 let serverProcess: ChildProcess | null = null;
 
 async function startServer() {
-  // 检查是否使用已有服务器
+  // Check if using existing server
   if (process.env['USE_EXISTING_SERVER'] === '1') {
     console.log('🔗 Using existing server on', BASE_URL);
     try {
@@ -76,10 +76,10 @@ async function startServer() {
     if (process.env['VERBOSE']) console.error('[Server Error]', message.trim());
   });
 
-  // 等待服务器启动（需要约 30 秒加载认证）
+  // Wait for server to start (needs about 30 seconds to load authentication)
   await new Promise((resolve) => setTimeout(resolve, 35000));
 
-  // 验证服务器
+  // Verify server
   try {
     const healthResponse = await fetch(BASE_URL);
     if (healthResponse.ok) {
@@ -271,7 +271,7 @@ describe('OpenAI Proxy API', () => {
 
       expect(response.status).toBe(200);
 
-      // 海盗应该说 "Arrr" - 但 Gemini 不一定总遵循
+      // Pirate should say "Arrr" - but Gemini doesn't always comply
       const content = response.data.choices[0].message.content.toLowerCase();
       const hasPirateSpeak = content.includes('arr') || content.includes('ahoy') || content.includes('matey');
 
@@ -321,7 +321,7 @@ describe('OpenAI Proxy API', () => {
 
       const message = response.data.choices[0].message;
 
-      // 验证工具调用
+      // Verify tool calls
       if (response.data.choices[0].finish_reason === 'tool_calls') {
         console.log('✅ Tool calls detected');
         expect(message.tool_calls).toBeDefined();
@@ -365,7 +365,7 @@ describe('OpenAI Proxy API', () => {
       expect(response.status).toBe(200);
       const content = response.data.choices[0].message.content.toLowerCase();
 
-      // 模型应该知道是晴天，不需要雨伞
+      // Model should know it's sunny, no need for umbrella
       expect(content).toMatch(/no|not|n't|don't|shouldn't/);
     });
 
@@ -399,7 +399,7 @@ describe('OpenAI Proxy API', () => {
 
       expect(response.status).toBe(200);
 
-      // 检查并行调用
+      // Check parallel calls
       if (response.data.choices[0].finish_reason === 'tool_calls') {
         const toolCalls = response.data.choices[0].message.tool_calls;
         console.log(`✅ Tool calls count: ${toolCalls.length}`);

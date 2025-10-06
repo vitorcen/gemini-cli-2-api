@@ -112,9 +112,9 @@ function mapModelName(requestedModel: string | undefined): string {
 
 function filterThoughtParts(parts: any[]): any[] {
   return parts
-    .filter(p => !p.thought)  // 过滤 thought: true 的 parts
+    .filter(p => !p.thought)  // Filter parts with thought: true
     .map(p => {
-      // 从每个 part 中删除 thoughtSignature 字段
+      // Remove thoughtSignature field from each part
       const { thoughtSignature, ...rest } = p;
       return rest;
     });

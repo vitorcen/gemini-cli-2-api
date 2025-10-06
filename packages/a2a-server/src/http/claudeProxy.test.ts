@@ -7,7 +7,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
 
-// 测试辅助函数
+// Test helper functions
 const BASE_URL = 'http://localhost:41242';
 
 interface HTTPResponse<T = any> {
@@ -108,11 +108,11 @@ async function streamPOST(
   return events;
 }
 
-// 服务器管理
+// Server management
 let serverProcess: ChildProcess | null = null;
 
 async function startServer() {
-  // 检查是否使用已有服务器
+  // Check if using existing server
   if (process.env['USE_EXISTING_SERVER'] === '1') {
     console.log('🔗 Using existing server on', BASE_URL);
     try {
@@ -153,10 +153,10 @@ async function startServer() {
     if (process.env['VERBOSE']) console.error('[Server Error]', message.trim());
   });
 
-  // 等待服务器启动（需要约 30 秒加载认证）
+  // Wait for server to start (needs about 30 seconds to load authentication)
   await new Promise((resolve) => setTimeout(resolve, 35000));
 
-  // 验证服务器
+  // Verify server
   try {
     const healthResponse = await fetch(BASE_URL);
     if (healthResponse.ok) {
@@ -200,7 +200,7 @@ describe('Claude Proxy API', () => {
       max_tokens: 20000,
     });
 
-    // 打印 token 使用情况
+    // Print token usage
     if (response.data.usage) {
       const usage = response.data.usage;
       console.log(`📊 Tokens - Input: ${usage.input_tokens}, Output: ${usage.output_tokens}`);
@@ -349,7 +349,7 @@ describe('Claude Proxy API', () => {
 
     console.log(`Round 1 - 📊 Tokens: Input=${round1InputTokens}, Output=${round1OutputTokens}`);
 
-    // 提取文本（只处理 text_delta，忽略工具调用）
+    // Extract text (only process text_delta, ignore tool calls)
     const text1 = events1
       .filter((e) => e.type === 'content_block_delta' && e.data?.delta?.type === 'text_delta')
       .reduce((acc, e) => acc + (e.data.delta.text || ''), '');
@@ -464,7 +464,7 @@ describe('Claude Proxy API', () => {
       max_tokens: 20000,
     });
 
-    // 打印 token 使用情况
+    // Print token usage
     if (response.data.usage) {
       const usage = response.data.usage;
       console.log(`📊 Tokens - Input: ${usage.input_tokens}, Output: ${usage.output_tokens}`);
@@ -702,7 +702,7 @@ describe('Claude Proxy API', () => {
 
     const data = await response.json();
 
-    // 打印 token 使用情况
+    // Print token usage
     if (data.usage) {
       console.log(`📊 Tokens - Input: ${data.usage.input_tokens}, Output: ${data.usage.output_tokens}`);
     }
@@ -735,7 +735,7 @@ describe('Claude Proxy API', () => {
       ]
     });
 
-    // 打印 token 使用情况
+    // Print token usage
     if (response.data.usage) {
       const usage = response.data.usage;
       console.log(`📊 Tokens - Input: ${usage.input_tokens}, Output: ${usage.output_tokens}`);
