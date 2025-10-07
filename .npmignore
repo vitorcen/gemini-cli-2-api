@@ -1,0 +1,50 @@
+# Source files
+src/
+*.ts
+!*.d.ts
+
+# Tests
+**/*.test.js
+**/*.test.js.map
+**/*.test.d.ts
+**/*.test.circular.js
+**/*.test.circular.d.ts
+**/test-utils/
+coverage/
+junit.xml
+vitest.config.ts
+TEST_GUIDE.md
+
+# Development files
+node_modules/
+.git/
+.github/
+scripts/
+integration-tests/
+docs/
+*.md
+!README.md
+!README-zh.md
+!LICENSE
+
+# Build files
+tsconfig.json
+esbuild.config.js
+.eslintrc.*
+.prettierrc.*
+
+# CI/CD
+.husky/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+.DS_Store
+*.swp
+*.bak

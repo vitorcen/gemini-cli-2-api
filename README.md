@@ -22,7 +22,49 @@ An API proxy server based on `@google/gemini-cli@0.8.0-preview.1` that forwards 
 - Real API call validation
 - Token usage statistics
 
-## Quick Start
+## Installation
+
+### Global Installation (Recommended)
+
+Install the package globally via npm:
+
+```bash
+npm install -g @vitorcen/gemini-cli-2-api
+```
+
+## Usage
+
+### Start Server
+
+**Foreground Mode** (view logs in terminal, Ctrl+C to stop):
+```bash
+gemini-cli-2-api
+```
+
+**Background Service Mode** (runs in background):
+```bash
+gemini-cli-2-api start
+```
+
+### Manage Server
+
+```bash
+gemini-cli-2-api status   # Check server status
+gemini-cli-2-api stop     # Stop background service
+gemini-cli-2-api -h       # Show help
+```
+
+The server runs on port **41242** with `USE_CCPA=1` enabled.
+
+**Startup Process:**
+1. Kill existing process on port 41242 (if any)
+2. Wait 3 seconds for port cleanup
+3. Login to CCPA (~30 seconds)
+4. Server ready
+
+**Total startup time:** ~30-35 seconds
+
+## Quick Start (Development)
 
 ### 1. Install Dependencies
 
