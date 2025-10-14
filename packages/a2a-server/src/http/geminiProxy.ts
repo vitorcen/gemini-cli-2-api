@@ -87,16 +87,22 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
     const filtered = parts
       .filter(p => !p.thought)  // Filter parts with thought: true
       .map(p => {
-        // Remove thoughtSignature field from each part
-        const { thoughtSignature, ...rest } = p;
-        return rest;
+        // Only create new object if thoughtSignature exists
+        if ('thoughtSignature' in p) {
+          const { thoughtSignature, ...rest } = p;
+          return rest;
+        }
+        return p;
       });
 
     // If filtered result is empty, keep original parts (remove thoughtSignature but don't filter thought)
     if (filtered.length === 0 && parts.length > 0) {
       return parts.map(p => {
-        const { thoughtSignature, ...rest } = p;
-        return rest;
+        if ('thoughtSignature' in p) {
+          const { thoughtSignature, ...rest } = p;
+          return rest;
+        }
+        return p;
       });
     }
 
@@ -140,7 +146,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       const result: GeminiResponse = {
         candidates: response.candidates?.map((candidate, index) => ({
           content: {
-            ...candidate.content,
+            role: candidate.content?.role || 'model',
             parts: filterThoughtParts(candidate.content?.parts || [])
           } as GeminiContent,
           finishReason: candidate.finishReason || 'STOP',
@@ -227,7 +233,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
 
                   return {
                     content: {
-                      ...candidate.content,
+                      role: candidate.content?.role || 'model',
                       parts: filteredParts
                     } as GeminiContent,
                     finishReason: candidate.finishReason || '',
@@ -286,7 +292,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
         const result: GeminiResponse = {
           candidates: response.candidates?.map((candidate, index) => ({
             content: {
-              ...candidate.content,
+              role: candidate.content?.role || 'model',
               parts: filterThoughtParts(candidate.content?.parts || [])
             } as GeminiContent,
             finishReason: candidate.finishReason || 'STOP',

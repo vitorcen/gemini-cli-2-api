@@ -540,5 +540,5 @@ describe('Gemini Native API', () => {
     expect(candidate.content.parts[0].text).toBeDefined();
     console.log('✅ Large payload handled successfully');
     console.log('Summary:', candidate.content.parts[0].text);
-  });
+  }, 30000);
 });

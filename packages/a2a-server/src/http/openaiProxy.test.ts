@@ -422,4 +422,40 @@ describe('OpenAI Proxy API', () => {
       }
     });
   });
+
+  test('should handle large payload (128KB)', async () => {
+    console.log('\n📝 Testing 128KB payload...');
+
+    // Generate ~128KB text
+    const baseText = 'The quick brown fox jumps over the lazy dog. ';
+    const targetSize = 128 * 1024; // 128KB
+    const repetitions = Math.ceil(targetSize / baseText.length);
+    const largeText = baseText.repeat(repetitions).slice(0, targetSize);
+
+    console.log(`Payload size: ${(JSON.stringify({ content: largeText }).length / 1024).toFixed(2)} KB`);
+
+    const response = await POST('/v1/chat/completions', {
+      model: 'gemini-flash-latest',
+      messages: [
+        {
+          role: 'user',
+          content: `Here is a large document:\n\n${largeText}\n\nSummarize this in one sentence.`
+        }
+      ]
+    });
+
+    // Print token usage
+    if (response.data.usage) {
+      const usage = response.data.usage;
+      console.log(`📊 Tokens - Prompt: ${usage.prompt_tokens}, Completion: ${usage.completion_tokens}, Total: ${usage.total_tokens}`);
+    }
+
+    expect(response.status).toBe(200);
+    expect(response.data.choices).toBeDefined();
+    expect(response.data.choices[0].message.content).toBeDefined();
+    expect(response.data.usage).toBeDefined();
+
+    console.log('✅ Large payload handled successfully');
+    console.log('Summary:', response.data.choices[0].message.content);
+  }, 30000);
 });

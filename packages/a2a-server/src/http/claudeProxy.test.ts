@@ -748,5 +748,5 @@ describe('Claude Proxy API', () => {
 
     console.log('✅ Large payload handled successfully');
     console.log('Summary:', response.data.content[0].text);
-  });
+  }, 30000);
 });
