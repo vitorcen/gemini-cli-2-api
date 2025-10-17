@@ -122,9 +122,12 @@ function filterThoughtParts(parts: any[]): any[] {
 
 export function registerClaudeEndpoints(app: express.Router, defaultConfig: Config) {
   // Claude-compatible /v1/messages endpoint
-  app.post('/v1/messages', async (req: express.Request, res: express.Response) => {
+  app.post('/messages', async (req: express.Request, res: express.Response) => {
     try {
-      const body = req.body as ClaudeRequest;
+      const body = (req.body ?? {}) as ClaudeRequest;
+      if (!Array.isArray(body.messages)) {
+        throw new Error('`messages` must be an array.');
+      }
       const stream = Boolean(body.stream);
       const model = mapModelName(body.model);
 

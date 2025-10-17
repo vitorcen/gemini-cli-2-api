@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content, Tool, FunctionDeclaration } from '@google/genai';
+import type { Content, Tool, FunctionDeclaration, Part } from '@google/genai';
 
 export interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content:
+    | string
+    | null
+    | Array<{ text?: string; type?: string; [key: string]: unknown }>
+    | Record<string, unknown>;
   tool_calls?: Array<{
     id: string;
     type: 'function';
@@ -43,16 +47,53 @@ export function convertOpenAIMessagesToGemini(
   // Maintain tool_call_id -> function_name mapping
   const toolCallMap = new Map<string, string>();
 
+  const normalizeContent = (value: OpenAIMessage['content']): string => {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value
+        .map(part => {
+          if (typeof part === 'string') return part;
+          if (part && typeof part === 'object') {
+            if ('text' in part && typeof part.text === 'string') {
+              return part.text;
+            }
+            return JSON.stringify(part);
+          }
+          return '';
+        })
+        .filter(Boolean)
+        .join('\n');
+    }
+    if (typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+    return String(value);
+  };
+
   for (const msg of messages) {
     if (msg.role === 'system') {
       // Collect system prompts
-      systemInstruction += (msg.content || '') + '\n\n';
+      systemInstruction += normalizeContent(msg.content) + '\n\n';
     } else if (msg.role === 'user') {
-      // User message
-      contents.push({
-        role: 'user',
-        parts: [{ text: msg.content || '' }]
-      });
+      // By the time the message gets here, the `content` is guaranteed to be a string
+      // thanks to the `parseOpenAIInput` function.
+      const textContent = normalizeContent(msg.content);
+
+      // ✅ If last content was also user, merge them to meet Gemini API requirements.
+      const lastContent = contents[contents.length - 1];
+      if (lastContent && lastContent.role === 'user' && lastContent.parts) {
+        lastContent.parts.push({ text: textContent });
+      } else {
+        contents.push({
+          role: 'user',
+          parts: [{ text: textContent }]
+        });
+      }
     } else if (msg.role === 'assistant') {
       // ✅ Critical fix: Preserve assistant messages
       if (msg.tool_calls && msg.tool_calls.length > 0) {
@@ -60,8 +101,9 @@ export function convertOpenAIMessagesToGemini(
         const parts = [];
 
         // If there is text content, add text first
-        if (msg.content) {
-          parts.push({ text: msg.content });
+        const normalizedAssistantText = normalizeContent(msg.content);
+        if (normalizedAssistantText) {
+          parts.push({ text: normalizedAssistantText });
         }
 
         // Add tool calls and record mapping
@@ -84,23 +126,53 @@ export function convertOpenAIMessagesToGemini(
         // Normal text response
         contents.push({
           role: 'model',
-          parts: [{ text: msg.content || '' }]
+          parts: [{ text: normalizeContent(msg.content) }]
         });
       }
     } else if (msg.role === 'tool') {
       // Tool call result - Use mapping to find function name
       const functionName = msg.tool_call_id ? toolCallMap.get(msg.tool_call_id) : undefined;
 
+      let parsedResponse: Record<string, unknown> | null = null;
+      let summaryText = normalizeContent(msg.content);
+
+      if (typeof msg.content === 'string') {
+        try {
+          const asJson = JSON.parse(msg.content);
+          if (asJson && typeof asJson === 'object') {
+            parsedResponse = asJson as Record<string, unknown>;
+          } else {
+            parsedResponse = { result: asJson };
+          }
+        } catch {
+          parsedResponse = { result: msg.content };
+        }
+      } else if (Array.isArray(msg.content)) {
+        parsedResponse = { result: summaryText };
+      } else if (msg.content && typeof msg.content === 'object') {
+        parsedResponse = msg.content as Record<string, unknown>;
+      } else if (summaryText) {
+        parsedResponse = { result: summaryText };
+      } else {
+        parsedResponse = { result: '' };
+      }
+
+      const parts: Part[] = [{
+        functionResponse: {
+          name: functionName || 'unknown',
+          response: parsedResponse
+        }
+      }];
+
+      if (summaryText) {
+        parts.push({
+          text: `Tool ${functionName || 'response'}: ${summaryText}`
+        });
+      }
+
       contents.push({
         role: 'user',
-        parts: [{
-          functionResponse: {
-            name: functionName || 'unknown',
-            response: {
-              result: msg.content || ''
-            }
-          }
-        }]
+        parts
       });
     }
   }
@@ -119,11 +191,19 @@ export function convertOpenAIToolsToGemini(tools: OpenAITool[]): Tool[] {
     return [];
   }
 
-  const functionDeclarations: FunctionDeclaration[] = tools.map(tool => ({
-    name: tool.function.name,
-    description: tool.function.description || '',
-    parameters: tool.function.parameters
-  }));
+  // Filter out built-in tools (like web_search) that don't have function field
+  const functionDeclarations: FunctionDeclaration[] = tools
+    .filter(tool => tool.function && tool.function.name)
+    .map(tool => ({
+      name: tool.function.name,
+      description: tool.function.description || '',
+      parameters: tool.function.parameters
+    }));
+
+  // If no function declarations, return empty array
+  if (functionDeclarations.length === 0) {
+    return [];
+  }
 
   return [{ functionDeclarations }];
 }

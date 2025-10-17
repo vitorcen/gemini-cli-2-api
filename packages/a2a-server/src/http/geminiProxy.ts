@@ -110,9 +110,9 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
   };
 
   // Non-streaming generateContent endpoint
-  app.post('/v1beta/models/:model\\:generateContent', async (req: express.Request, res: express.Response) => {
+  app.post('/models/:model\\:generateContent', async (req: express.Request, res: express.Response) => {
     try {
-      const body = req.body as GeminiRequest;
+      const body = (req.body ?? {}) as GeminiRequest;
       const model = extractModel(req.path);
 
       // ✅ Pass Gemini native structure directly
@@ -170,9 +170,9 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
   });
 
   // Streaming streamGenerateContent endpoint with SSE
-  app.post('/v1beta/models/:model\\:streamGenerateContent', async (req: express.Request, res: express.Response) => {
+  app.post('/models/:model\\:streamGenerateContent', async (req: express.Request, res: express.Response) => {
     try {
-      const body = req.body as GeminiRequest;
+      const body = (req.body ?? {}) as GeminiRequest;
       const model = extractModel(req.path);
       const useSSE = req.query['alt'] === 'sse';
 

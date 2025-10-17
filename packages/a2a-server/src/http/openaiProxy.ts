@@ -7,13 +7,15 @@
 import type express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
-import { DEFAULT_GEMINI_FLASH_MODEL, getResponseText } from '@google/gemini-cli-core';
+import { DEFAULT_GEMINI_FLASH_MODEL, DEFAULT_GEMINI_MODEL, getResponseText } from '@google/gemini-cli-core';
 import {
   convertOpenAIMessagesToGemini,
   convertOpenAIToolsToGemini,
   type OpenAIMessage,
   type OpenAITool
 } from './adapters/messageConverter.js';
+import { requestStorage } from './requestStorage.js';
+import { logger } from '../utils/logger.js';
 
 interface OpenAIChatCompletionsRequest {
   model?: string;
@@ -26,12 +28,72 @@ interface OpenAIChatCompletionsRequest {
   tool_choice?: 'none' | 'auto' | { type: 'function'; function: { name: string } };
 }
 
+interface OpenAIResponsesRequest {
+  model?: string;
+  input: string | OpenAIMessage[];
+  temperature?: number;
+  top_p?: number;
+  max_output_tokens?: number;
+  stream?: boolean;
+  tools?: OpenAITool[];
+  previous_response_id?: string;
+  modalities?: string[];
+}
+
+function mapOpenAIModelToGemini(requestedModel: string | undefined): string {
+  if (!requestedModel) {
+    return DEFAULT_GEMINI_FLASH_MODEL;
+  }
+
+  const lower = requestedModel.toLowerCase();
+
+  if (lower.includes('nano')) {
+    return DEFAULT_GEMINI_FLASH_MODEL;
+  }
+  
+  if (lower.startsWith('gpt-')) {
+    return DEFAULT_GEMINI_MODEL;
+  }
+
+  return requestedModel;
+}
+
+function shouldFallbackToFlash(error: unknown, currentModel: string): boolean {
+  if (currentModel === DEFAULT_GEMINI_FLASH_MODEL) {
+    return false;
+  }
+
+  const status = (error as { response?: { status?: number } })?.response?.status;
+  if (status === 404) {
+    return true;
+  }
+
+  const message =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : typeof error === 'string'
+        ? error.toLowerCase()
+        : '';
+
+  if (!message) return false;
+
+  return (
+    message.includes('requested entity was not found') ||
+    message.includes('not_found') ||
+    message.includes('404')
+  );
+}
+
 export function registerOpenAIEndpoints(app: express.Router, config: Config) {
   // OpenAI-compatible Chat Completions endpoint
-  app.post('/v1/chat/completions', async (req: express.Request, res: express.Response) => {
+  app.post('/chat/completions', async (req: express.Request, res: express.Response) => {
     try {
-      const body = req.body as OpenAIChatCompletionsRequest;
-      const model = body.model || DEFAULT_GEMINI_FLASH_MODEL;
+      const body = (req.body ?? {}) as OpenAIChatCompletionsRequest;
+      if (!Array.isArray(body.messages)) {
+        throw new Error('`messages` must be an array.');
+      }
+
+      const model = mapOpenAIModelToGemini(body.model);
       const stream = Boolean(body.stream);
 
       // ✅ Use converter to preserve complete conversation history
@@ -265,5 +327,689 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
       res.status(400).json({ error: { message } });
     }
   });
+
+  // ✅ OpenAI Responses API endpoint (2025 new API)
+  app.post('/responses', async (req: express.Request, res: express.Response) => {
+    const store = requestStorage.getStore();
+    const requestId = store?.id || 'unknown-id';
+    logger.info(`[API_PROXY][${requestId}] Handling POST /v1/responses`);
+    try {
+      const body = (req.body ?? {}) as OpenAIResponsesRequest;
+      const model = mapOpenAIModelToGemini(body.model);
+      const stream = Boolean(body.stream);
+
+      const messages = parseOpenAIInput(body.input);
+
+      // Convert to Gemini format
+      const { contents, systemInstruction } = convertOpenAIMessagesToGemini(messages);
+
+      const responseId = `resp_${uuidv4()}`;
+      logger.info(
+        `[API_PROXY][${requestId}] Requested model: ${body.model ?? 'default'} | mapped model: ${model} | stream=${stream}`,
+      );
+      const commonParams = {
+        temperature: body.temperature ?? undefined,
+        topP: body.top_p ?? undefined,
+        maxOutputTokens: body.max_output_tokens ?? undefined,
+        tools: body.tools ? convertOpenAIToolsToGemini(body.tools) : [],
+        systemInstruction,
+      };
+
+      if (stream) {
+        await handleStreamingResponse(
+          res,
+          requestId,
+          responseId,
+          model,
+          contents,
+          config,
+          commonParams,
+        );
+      } else {
+        await handleNonStreamingResponse(
+          res,
+          requestId,
+          responseId,
+          model,
+          contents,
+          config,
+          commonParams,
+        );
+      }
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Bad request';
+      logger.error(`[API_PROXY] Error on /v1/responses: ${message}`);
+      res.status(400).json({ error: { message } });
+    }
+  });
 }
 
+/**
+ * Parses the varied input formats of OpenAI 'input' field into a standard OpenAIMessage array.
+ * @param input The 'input' field from the request.
+ * @returns A standardized array of OpenAIMessages.
+ */
+function parseOpenAIInput(input: any): OpenAIMessage[] {
+  logger.info(`[RESPONSES_API] Raw body.input: ${JSON.stringify(input).slice(0, 500)}`);
+
+  if (input === undefined || input === null) {
+    return [];
+  }
+
+  if (typeof input === 'string') {
+    return [{ role: 'user', content: input }];
+  }
+
+  if (Array.isArray(input)) {
+    if (input.length === 0) return [];
+
+    const firstItem = input[0];
+    if (typeof firstItem !== 'object' || firstItem === null) {
+      throw new Error('Invalid item in input array: must be an object.');
+    }
+
+    // Handles [{type:"message", content:[{type:"input_text"}]}]
+    if ('type' in firstItem && firstItem.type === 'message') {
+      const messages = input.map((item: any) => {
+        let textContent = '';
+        if (Array.isArray(item.content)) {
+          textContent = item.content
+            .filter((c: any) => c.type === 'input_text' && c.text)
+            .map((c: any) => c.text)
+            .join('\n\n');
+        } else {
+          textContent = item.content || '';
+        }
+        return { role: item.role || 'user', content: textContent };
+      });
+      logger.info(`[RESPONSES_API] Parsed 'message' type input to ${messages.length} messages.`);
+      return messages;
+    }
+
+    // Handles [{type:"input_text", text:"..."}]
+    if ('type' in firstItem && firstItem.type === 'input_text') {
+      const textContent = input
+        .filter((item: any) => item.type === 'input_text' && item.text)
+        .map((item: any) => item.text)
+        .join('\n\n');
+      logger.info(`[RESPONSES_API] Parsed 'input_text' type input.`);
+      return [{ role: 'user', content: textContent }];
+    }
+
+    // Handles standard [{role:"user", content:"..."}]
+    if ('role' in firstItem) {
+      logger.info(`[RESPONSES_API] Parsed standard message array.`);
+      return input as OpenAIMessage[];
+    }
+  }
+
+  throw new Error('Invalid input format: must be a string or a supported array format.');
+}
+
+async function handleStreamingResponse(
+  res: express.Response,
+  requestId: string,
+  responseId: string,
+  model: string,
+  contents: any[],
+  config: Config,
+  params: any,
+) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+
+  const outputItemId = `msg_${uuidv4()}`;
+
+  const writeEvent = (event: any) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+    // @ts-ignore
+    if (res.flush) res.flush();
+  };
+
+  let currentModel = model;
+  let streamGen: AsyncIterable<any> | null = null;
+
+  while (true) {
+    try {
+      streamGen = await config.getGeminiClient().rawGenerateContentStream(
+        contents,
+        params,
+        new AbortController().signal,
+        currentModel,
+      );
+      break;
+    } catch (err) {
+      if (shouldFallbackToFlash(err, currentModel)) {
+        logger.warn(
+          `[API_PROXY][${requestId}] Model ${currentModel} unavailable (404). Falling back to ${DEFAULT_GEMINI_FLASH_MODEL}.`,
+        );
+        currentModel = DEFAULT_GEMINI_FLASH_MODEL;
+        continue;
+      }
+
+      const message = err instanceof Error ? err.message : 'Stream error';
+      logger.error(`[API_PROXY][${requestId}] Failed to start streaming: ${message}`);
+      writeEvent(createStreamingEvent('response.created', { responseId }));
+      writeEvent(createStreamingEvent('response.error', { responseId, message }));
+      writeEvent(
+        createStreamingEvent('response.done', {
+          responseId,
+          outputItemId,
+          accumulatedText: '',
+          usageMetadata: null,
+          status: 'failed',
+          errorMessage: message,
+        }),
+      );
+      writeEvent(
+        createStreamingEvent('response.completed', {
+          responseId,
+          outputItemId,
+          accumulatedText: '',
+          usageMetadata: null,
+          status: 'failed',
+          errorMessage: message,
+        }),
+      );
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+  }
+
+  if (!streamGen) {
+    writeEvent(createStreamingEvent('response.created', { responseId }));
+    writeEvent(createStreamingEvent('response.error', { responseId, message: 'Stream unavailable' }));
+    writeEvent(
+      createStreamingEvent('response.done', {
+        responseId,
+        outputItemId,
+        accumulatedText: '',
+        usageMetadata: null,
+        status: 'failed',
+        errorMessage: 'Stream unavailable',
+      }),
+    );
+    writeEvent(
+      createStreamingEvent('response.completed', {
+        responseId,
+        outputItemId,
+        accumulatedText: '',
+        usageMetadata: null,
+        status: 'failed',
+        errorMessage: 'Stream unavailable',
+      }),
+    );
+    res.write('data: [DONE]\n\n');
+    res.end();
+    return;
+  }
+
+  // Per OpenAI docs, the stream starts with a `response.created` event.
+  writeEvent(createStreamingEvent('response.created', { responseId }));
+
+  const activeStream = streamGen;
+  let accumulatedText = '';
+  let usageMetadata: any = null;
+  let streamError: Error | null = null;
+  let outputItemAdded = false;
+  type OutputItemType = 'message' | 'function_call';
+  let outputItemType: OutputItemType = 'message';
+  interface FunctionCallContext {
+    name: string;
+    callId: string;
+    argsText: string;
+  }
+  let functionCallState: FunctionCallContext | undefined;
+
+  const ensureMessageOutputItem = () => {
+    if (!outputItemAdded) {
+      outputItemType = 'message';
+      outputItemAdded = true;
+      writeEvent(createStreamingEvent('response.output_item.added', { outputItemId, itemType: 'message' }));
+      writeEvent(createStreamingEvent('response.content_part.added', { outputItemId, output_index: 0 }));
+    }
+  };
+
+  const ensureFunctionCallOutputItem = (name: string) => {
+    if (!outputItemAdded) {
+      outputItemType = 'function_call';
+      outputItemAdded = true;
+      functionCallState = {
+        name,
+        callId: `call_${uuidv4()}`,
+        argsText: '',
+      };
+      writeEvent(
+        createStreamingEvent('response.output_item.added', {
+          outputItemId,
+          itemType: 'function_call',
+          functionCall: {
+            ...functionCallState,
+            arguments: functionCallState.argsText,
+          },
+        }),
+      );
+    }
+  };
+
+  try {
+    for await (const chunk of activeStream) {
+      if (chunk.usageMetadata) {
+        usageMetadata = chunk.usageMetadata;
+      }
+
+      const parts = (chunk.candidates?.[0]?.content?.parts || []) as Array<{
+        text?: string;
+        functionCall?: {
+          name?: string;
+          args?: unknown;
+        };
+      }>;
+      const functionCalls = parts.filter(
+        (part): part is { functionCall: { name?: string; args?: unknown } } =>
+          Boolean(part.functionCall),
+      );
+      const textParts = parts.filter(part => part.text && !('functionCall' in part));
+
+      if (functionCalls.length > 0) {
+        const fc = functionCalls[0]?.functionCall;
+        if (fc) {
+          const functionName = typeof fc.name === 'string' ? fc.name : 'function_call';
+          ensureFunctionCallOutputItem(functionName);
+
+          if (functionCallState) {
+            const currentArgs = JSON.stringify(fc.args ?? {});
+            const previousState = functionCallState;
+            let delta = '';
+            if (
+              currentArgs.length > previousState.argsText.length &&
+              currentArgs.startsWith(previousState.argsText)
+            ) {
+              delta = currentArgs.slice(previousState.argsText.length);
+            } else if (currentArgs) {
+              delta = currentArgs;
+            }
+            functionCallState = {
+              ...previousState,
+              argsText: currentArgs,
+            };
+
+            if (delta) {
+              const callId = functionCallState.callId;
+              writeEvent(
+                createStreamingEvent('response.function_call_arguments.delta', {
+                  responseId,
+                  outputItemId,
+                  callId,
+                  delta,
+                }),
+              );
+            }
+          }
+        }
+      }
+
+      if (textParts.length > 0 && outputItemType === 'message') {
+        ensureMessageOutputItem();
+        const currentFullText = textParts
+          .map(part => part.text ?? '')
+          .join('');
+        let delta = '';
+        if (currentFullText.length > accumulatedText.length && currentFullText.startsWith(accumulatedText)) {
+          delta = currentFullText.slice(accumulatedText.length);
+        } else if (currentFullText.length > 0) {
+          delta = currentFullText;
+        }
+        accumulatedText += delta;
+  
+        if (delta) {
+          writeEvent(
+            createStreamingEvent('response.output_text.delta', {
+              responseId,
+              outputItemId,
+              delta,
+            }),
+          );
+        }
+      }
+    }
+  } catch (err) {
+    streamError = err instanceof Error ? err : new Error('Stream error');
+    logger.error(`[API_PROXY][${requestId}] Streaming error: ${streamError.message}`);
+    writeEvent(createStreamingEvent('response.error', { responseId, message: streamError.message }));
+  }
+
+  if (!streamError && !outputItemAdded) {
+    ensureMessageOutputItem();
+  }
+
+  if (!streamError) {
+    // After all deltas, send the `done` events
+    if (outputItemType === 'message') {
+      writeEvent(
+        createStreamingEvent('response.output_text.done', {
+          outputItemId,
+          outputIndex: 0,
+          accumulatedText,
+        }),
+      );
+    } else if (functionCallState) {
+      writeEvent(
+        createStreamingEvent('response.function_call_arguments.done', {
+          responseId,
+          outputItemId,
+          callId: functionCallState.callId,
+        }),
+      );
+    }
+
+    const finalFunctionCall = functionCallState
+      ? { ...functionCallState, arguments: functionCallState.argsText }
+      : undefined;
+
+    writeEvent(
+      createStreamingEvent('response.output_item.done', {
+        outputItemId,
+        outputItemType,
+        accumulatedText,
+        functionCall: finalFunctionCall,
+      }),
+    );
+  }
+
+  const resultFunctionCall = functionCallState
+    ? { ...functionCallState, arguments: functionCallState.argsText }
+    : undefined;
+
+  writeEvent(
+    createStreamingEvent('response.done', {
+      responseId,
+      outputItemId,
+      outputItemType,
+      accumulatedText,
+      usageMetadata,
+      functionCall: resultFunctionCall,
+      status: streamError
+        ? 'failed'
+        : outputItemType === 'message'
+          ? 'completed'
+          : 'requires_action',
+      errorMessage: streamError?.message,
+    }),
+  );
+  writeEvent(
+    createStreamingEvent('response.completed', {
+      responseId,
+      outputItemId,
+      outputItemType,
+      accumulatedText,
+      usageMetadata,
+      functionCall: resultFunctionCall,
+      status: streamError
+        ? 'failed'
+        : outputItemType === 'message'
+          ? 'completed'
+          : 'requires_action',
+      errorMessage: streamError?.message,
+    }),
+  );
+
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
+async function handleNonStreamingResponse(
+  res: express.Response,
+  requestId: string,
+  responseId: string,
+  model: string,
+  contents: any[],
+  config: Config,
+  params: any,
+) {
+  let currentModel = model;
+
+  while (true) {
+    try {
+      const geminiResponse = await config.getGeminiClient().rawGenerateContent(
+        contents,
+        params,
+        new AbortController().signal,
+        currentModel,
+      );
+
+      const text = getResponseText(geminiResponse);
+      const result = {
+        id: responseId,
+        object: 'response',
+        created: Math.floor(Date.now() / 1000),
+        model: currentModel,
+        output: [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text }],
+          },
+        ],
+        usage: {
+          input_tokens: geminiResponse.usageMetadata?.promptTokenCount || 0,
+          output_tokens: geminiResponse.usageMetadata?.candidatesTokenCount || 0,
+        },
+      };
+      res.status(200).json(result);
+      return;
+    } catch (err) {
+      if (shouldFallbackToFlash(err, currentModel)) {
+        logger.warn(
+          `[API_PROXY][${requestId}] Model ${currentModel} unavailable (404). Falling back to ${DEFAULT_GEMINI_FLASH_MODEL}.`,
+        );
+        currentModel = DEFAULT_GEMINI_FLASH_MODEL;
+        continue;
+      }
+
+      const message = err instanceof Error ? err.message : 'Failed to generate response';
+      logger.error(`[API_PROXY][${requestId}] Non-streaming error: ${message}`);
+      res.status(400).json({ error: { message } });
+      return;
+    }
+  }
+}
+
+function createStreamingEvent(type: string, data: any): any {
+  const eventId = `event_${uuidv4()}`;
+  switch (type) {
+    case 'response.created':
+      return {
+        event_id: eventId,
+        type,
+        response: {
+          id: data.responseId,
+          object: 'realtime.response',
+          status: 'in_progress',
+        },
+      };
+    case 'response.output_item.added':
+      return {
+        event_id: eventId,
+        type,
+        item: buildOutputItem(data, {
+          status: 'in_progress',
+          content: [],
+        }),
+      };
+    case 'response.content_part.added':
+       return {
+        event_id: eventId,
+        type,
+        item_id: data.outputItemId,
+        output_index: data.output_index,
+        content: { type: 'text', text: '' },
+      };
+    case 'response.output_text.delta':
+      return {
+        event_id: eventId,
+        type,
+        delta: data.delta ?? '',
+      };
+    case 'response.output_text.done':
+      return {
+        event_id: eventId,
+        type,
+        output_item_id: data.outputItemId,
+        output_index: data.outputIndex ?? 0,
+        output_text: data.accumulatedText ?? '',
+      };
+    case 'response.function_call_arguments.delta':
+      return {
+        event_id: eventId,
+        type,
+        call_id: data.callId,
+        delta: data.delta ?? '',
+      };
+    case 'response.function_call_arguments.done':
+      return {
+        event_id: eventId,
+        type,
+        call_id: data.callId,
+      };
+    case 'response.output_item.done':
+      return {
+        event_id: eventId,
+        type,
+        item: buildOutputItem(data, {
+          status: data.outputItemType === 'function_call' ? 'requires_action' : 'completed',
+          content: data.outputItemType === 'message'
+            ? [{ type: 'text', text: data.accumulatedText }]
+            : undefined,
+        }),
+      };
+    case 'response.done':
+      const usage = data.usageMetadata || {};
+      return {
+        event_id: eventId,
+        type,
+        response: {
+          id: data.responseId,
+          object: 'realtime.response',
+          status: data.status || 'completed',
+          output: [
+            buildOutputSummary(data, {
+              status: data.status === 'failed' ? 'failed' : data.status || 'completed',
+            }),
+          ],
+          usage: {
+            total_tokens: (usage.promptTokenCount || 0) + (usage.candidatesTokenCount || 0),
+            input_tokens: usage.promptTokenCount || 0,
+            output_tokens: usage.candidatesTokenCount || 0,
+          },
+          ...(data.errorMessage && {
+            error: { message: data.errorMessage },
+          }),
+        },
+      };
+    case 'response.completed':
+      return {
+        event_id: eventId,
+        type,
+        response: {
+          id: data.responseId,
+          object: 'realtime.response',
+          status: data.status || 'completed',
+          output: [
+            buildOutputSummary(data, {
+              status: data.status === 'failed' ? 'failed' : data.status || 'completed',
+            }),
+          ],
+          usage: {
+            total_tokens:
+              (data.usageMetadata?.promptTokenCount || 0) +
+              (data.usageMetadata?.candidatesTokenCount || 0),
+            input_tokens: data.usageMetadata?.promptTokenCount || 0,
+            output_tokens: data.usageMetadata?.candidatesTokenCount || 0,
+          },
+          ...(data.errorMessage && {
+            error: { message: data.errorMessage },
+          }),
+        },
+      };
+    case 'response.error':
+      return {
+        event_id: eventId,
+        type,
+        error: {
+          message: data.message || 'Stream error',
+          response_id: data.responseId,
+        },
+      };
+    default:
+      // Fallback for unknown types, though this shouldn't be hit.
+      return { event_id: eventId, type };
+  }
+}
+
+function buildOutputItem(
+  data: any,
+  overrides: Partial<{
+    status: string;
+    content: Array<{ type: string; text: string }>;
+  }>,
+) {
+  if (data.itemType === 'function_call' || data.outputItemType === 'function_call') {
+    const functionCall = (data.functionCall || {}) as {
+      callId?: string;
+      name?: string;
+      arguments?: string;
+    };
+    return {
+      id: data.outputItemId,
+      object: 'realtime.item',
+      type: 'function_call',
+      status: overrides.status ?? 'in_progress',
+      call_id: functionCall.callId,
+      name: functionCall.name,
+      arguments: functionCall.arguments,
+    };
+  }
+
+  return {
+    id: data.outputItemId,
+    object: 'realtime.item',
+    type: 'message',
+    status: overrides.status ?? 'in_progress',
+    role: 'assistant',
+    content: overrides.content ?? [],
+  };
+}
+
+function buildOutputSummary(
+  data: any,
+  overrides: Partial<{
+    status: string;
+  }>,
+) {
+  if (data.outputItemType === 'function_call') {
+    const functionCall = (data.functionCall || {}) as {
+      callId?: string;
+      name?: string;
+      arguments?: string;
+    };
+    return {
+      id: data.outputItemId,
+      type: 'function_call',
+      status: overrides.status ?? 'requires_action',
+      call_id: functionCall.callId,
+      name: functionCall.name,
+      arguments: functionCall.arguments,
+    };
+  }
+
+  return {
+    id: data.outputItemId,
+    type: 'message',
+    status: overrides.status ?? 'completed',
+    role: 'assistant',
+    content: [{ type: 'text', text: data.accumulatedText || '' }],
+  };
+}

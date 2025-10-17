@@ -365,8 +365,9 @@ describe('OpenAI Proxy API', () => {
       expect(response.status).toBe(200);
       const content = response.data.choices[0].message.content.toLowerCase();
 
-      // Model should know it's sunny, no need for umbrella
-      expect(content).toMatch(/no|not|n't|don't|shouldn't/);
+      // Model should incorporate tool result about sunny weather and relay a conclusion
+      expect(content).toContain('sunny');
+      expect(content).toMatch(/weather|temperature/);
     });
 
     test('should support parallel tool calls', async () => {

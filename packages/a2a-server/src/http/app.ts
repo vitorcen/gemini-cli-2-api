@@ -91,15 +91,20 @@ export async function createApp() {
       agentExecutor,
     );
 
+    const a2aApp = express();
+    const proxyApp = express();
     let expressApp = express();
 
     // ✅ Set 100mb limit GLOBALLY before any routes or middleware
     // This will be used by ALL routes (A2A + API proxy)
     expressApp.use(express.json({ limit: '100mb' }));
+    const appBuilder = new A2AExpressApp(requestHandler);
+    appBuilder.setupRoutes(a2aApp, '');
     expressApp.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-    expressApp.use((req, res, next) => {
-      requestStorage.run({ req }, next);
+    proxyApp.use((req, res, next) => {
+      const requestId = uuidv4();
+      requestStorage.run({ req, id: requestId }, next);
     });
 
     // Mount API proxy routes
@@ -114,18 +119,23 @@ export async function createApp() {
       registerGeminiEndpoints(apiProxyRouter, config);
       registerClaudeEndpoints(apiProxyRouter, config);
 
-      expressApp.use('/', apiProxyRouter);
+      proxyApp.use('/', apiProxyRouter);
 
-      logger.info('[CoreAgent] OpenAI-compatible endpoints mounted at /v1/chat/completions');
-      logger.info('[CoreAgent] Gemini-compatible endpoints mounted at /v1/messages');
-      logger.info('[CoreAgent] Gemini-compatible endpoints mounted at /v1beta/models/*');
+      logger.info('[CoreAgent] OpenAI Chat Completions API: /v1/chat/completions');
+      logger.info('[CoreAgent] OpenAI Responses API: /v1/responses');
+      logger.info('[CoreAgent] Claude Messages API: /v1/messages');
+      logger.info('[CoreAgent] Gemini Native API: /v1beta/models/*');
+      logger.info('[CoreAgent] Note: Config will be loaded on first API request');
     } catch (e) {
       logger.warn('[CoreAgent] Skipping API proxy endpoints:', e);
     }
 
-    const appBuilder = new A2AExpressApp(requestHandler);
-    expressApp = appBuilder.setupRoutes(expressApp, '');
+    // Main app to route requests
+    expressApp.use('/v1beta', proxyApp);
+    expressApp.use('/v1', proxyApp);
+    expressApp.use('/', a2aApp);
 
+    // Centralized task creation endpoint
     expressApp.post('/tasks', async (req, res) => {
       try {
         const taskId = uuidv4();
