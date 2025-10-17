@@ -6,7 +6,15 @@
 
 import type express from 'express';
 import type { Config } from '@google/gemini-cli-core';
-import type { Content, GenerateContentResponse, Part } from '@google/genai';
+import { FunctionCallingConfigMode } from '@google/genai';
+import type {
+  AutomaticFunctionCallingConfig,
+  Content,
+  GenerateContentResponse,
+  Part,
+  ToolConfig,
+} from '@google/genai';
+import { logger } from '../utils/logger.js';
 
 interface GeminiPart {
   text?: string;
@@ -67,6 +75,19 @@ interface GeminiResponse {
   usageMetadata?: GeminiUsageMetadata;
 }
 
+const formatTokenCount = (value?: number): string =>
+  typeof value === 'number' ? value.toLocaleString('en-US') : '0';
+
+const sumTokenCounts = (...values: Array<number | undefined>): number => {
+  let total = 0;
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      total += value;
+    }
+  }
+  return total;
+};
+
 export function registerGeminiEndpoints(app: express.Router, config: Config) {
   // Helper to extract model from path
   const extractModel = (path: string): string => {
@@ -112,6 +133,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
   // Non-streaming generateContent endpoint
   app.post('/models/:model\\:generateContent', async (req: express.Request, res: express.Response) => {
     try {
+      const requestId = req.headers['x-request-id'] ?? 'gemini-nonstream';
       const body = (req.body ?? {}) as GeminiRequest;
       const model = extractModel(req.path);
 
@@ -123,6 +145,25 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       const temperature = body.generationConfig?.temperature;
       const topP = body.generationConfig?.topP;
       const maxOutputTokens = body.generationConfig?.maxOutputTokens;
+      const allowedFunctionNames =
+        tools.flatMap(tool => tool.functionDeclarations ?? [])
+          .map(fd => fd?.name)
+          .filter((name): name is string => Boolean(name));
+      const toolConfig: ToolConfig | undefined =
+        tools.length > 0
+          ? {
+              functionCallingConfig: {
+                mode: FunctionCallingConfigMode.ANY,
+                ...(allowedFunctionNames.length > 0 && { allowedFunctionNames }),
+              },
+            }
+          : undefined;
+      const automaticFunctionCalling: AutomaticFunctionCallingConfig | undefined =
+        tools.length > 0
+          ? {
+              disable: false,
+            }
+          : undefined;
 
       // Use rawGenerateContent to bypass system prompt injection
       const response = await config
@@ -134,6 +175,8 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
             topP,
             maxOutputTokens,
             ...(tools.length > 0 && { tools }),
+            ...(toolConfig && { toolConfig }),
+            ...(automaticFunctionCalling && { automaticFunctionCalling }),
             ...(systemInstruction && { systemInstruction }),
           },
           new AbortController().signal,
@@ -142,6 +185,10 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
 
       // ✅ Return Gemini native response format directly
       const usage = (response as GenerateContentResponse & { usageMetadata?: any }).usageMetadata;
+      const usageLog = usage
+        ? `prompt=${formatTokenCount(usage.promptTokenCount)} completion=${formatTokenCount(usage.candidatesTokenCount)} total=${formatTokenCount(usage.totalTokenCount ?? sumTokenCounts(usage.promptTokenCount, usage.candidatesTokenCount))}`
+        : 'prompt=unknown completion=unknown total=unknown';
+      logger.info(`[GEMINI_PROXY][${requestId}] Usage ${usageLog}`);
 
       const result: GeminiResponse = {
         candidates: response.candidates?.map((candidate, index) => ({
@@ -172,6 +219,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
   // Streaming streamGenerateContent endpoint with SSE
   app.post('/models/:model\\:streamGenerateContent', async (req: express.Request, res: express.Response) => {
     try {
+      const requestId = req.headers['x-request-id'] ?? 'gemini-stream';
       const body = (req.body ?? {}) as GeminiRequest;
       const model = extractModel(req.path);
       const useSSE = req.query['alt'] === 'sse';
@@ -184,6 +232,25 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
       const temperature = body.generationConfig?.temperature;
       const topP = body.generationConfig?.topP;
       const maxOutputTokens = body.generationConfig?.maxOutputTokens;
+      const allowedFunctionNames =
+        tools.flatMap(tool => tool.functionDeclarations ?? [])
+          .map(fd => fd?.name)
+          .filter((name): name is string => Boolean(name));
+      const toolConfig: ToolConfig | undefined =
+        tools.length > 0
+          ? {
+              functionCallingConfig: {
+                mode: FunctionCallingConfigMode.ANY,
+                ...(allowedFunctionNames.length > 0 && { allowedFunctionNames }),
+              },
+            }
+          : undefined;
+      const automaticFunctionCalling: AutomaticFunctionCallingConfig | undefined =
+        tools.length > 0
+          ? {
+              disable: false,
+            }
+          : undefined;
 
       if (useSSE) {
         // SSE streaming
@@ -202,6 +269,8 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
               topP,
               maxOutputTokens,
               ...(tools.length > 0 && { tools }),
+              ...(toolConfig && { toolConfig }),
+              ...(automaticFunctionCalling && { automaticFunctionCalling }),
               ...(systemInstruction && { systemInstruction }),
             },
             new AbortController().signal,
@@ -261,6 +330,13 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
             }
           }
 
+          const totalTokens = usageMetadata
+            ? usageMetadata.totalTokenCount ?? sumTokenCounts(usageMetadata.promptTokenCount, usageMetadata.candidatesTokenCount)
+            : undefined;
+          logger.info(
+            `[GEMINI_PROXY][${requestId}] Tokens usage prompt=${formatTokenCount(usageMetadata?.promptTokenCount)} completion=${formatTokenCount(usageMetadata?.candidatesTokenCount)} total=${formatTokenCount(totalTokens)}`,
+          );
+
           res.end();
         } catch (err) {
           const errorResponse = {
@@ -281,6 +357,8 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
               topP,
               maxOutputTokens,
               ...(tools.length > 0 && { tools }),
+              ...(toolConfig && { toolConfig }),
+              ...(automaticFunctionCalling && { automaticFunctionCalling }),
               ...(systemInstruction && { systemInstruction }),
             },
             new AbortController().signal,

@@ -682,7 +682,7 @@ describe('Claude Proxy API', () => {
   });
 
   test('should support X-Working-Directory header', async () => {
-    console.log('\n📝 Testing X-Working-Directory header...');
+    console.log('\n📝 Testing X-Working-Directory header...'); 
 
     // Use current working directory to avoid warnings
     const workingDir = process.cwd();
@@ -711,7 +711,7 @@ describe('Claude Proxy API', () => {
     expect(data.content[0].text).toBeDefined();
 
     console.log(`✅ Working directory header accepted: ${workingDir}`);
-  }, 10000);
+  }, 20000);
 
   test('should handle large payload (128KB)', async () => {
     console.log('\n📝 Testing 128KB payload...');

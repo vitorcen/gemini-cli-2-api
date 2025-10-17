@@ -92,7 +92,7 @@ export async function loadConfig(
   await config.initialize();
 
   if (process.env['USE_CCPA']) {
-    logger.info('[Config] Using CCPA Auth:');
+    logger.info('[Config] Using CCPA Auth');
     try {
       if (adcFilePath) {
         path.resolve(adcFilePath);
@@ -103,9 +103,9 @@ export async function loadConfig(
       );
     }
     await config.refreshAuth(AuthType.LOGIN_WITH_GOOGLE);
-    logger.info(
-      `[Config] GOOGLE_CLOUD_PROJECT: ${process.env['GOOGLE_CLOUD_PROJECT']}`,
-    );
+    // logger.info(
+    //   `[Config] GOOGLE_CLOUD_PROJECT: ${process.env['GOOGLE_CLOUD_PROJECT']}`,
+    // );
   } else if (process.env['GEMINI_API_KEY']) {
     logger.info('[Config] Using Gemini API Key');
     await config.refreshAuth(AuthType.USE_GEMINI);

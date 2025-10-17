@@ -8,6 +8,12 @@ import type express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
 import { DEFAULT_GEMINI_FLASH_MODEL, DEFAULT_GEMINI_MODEL, getResponseText } from '@google/gemini-cli-core';
+import { FunctionCallingConfigMode } from '@google/genai';
+import type {
+  AutomaticFunctionCallingConfig,
+  Tool,
+  ToolConfig,
+} from '@google/genai';
 import {
   convertOpenAIMessagesToGemini,
   convertOpenAIToolsToGemini,
@@ -16,6 +22,21 @@ import {
 } from './adapters/messageConverter.js';
 import { requestStorage } from './requestStorage.js';
 import { logger } from '../utils/logger.js';
+
+const LOG_PREFIX = '[OPENAI_PROXY]';
+
+const formatTokenCount = (value?: number): string =>
+  typeof value === 'number' ? value.toLocaleString('en-US') : '0';
+
+const sumTokenCounts = (...values: Array<number | undefined>): number => {
+  let total = 0;
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      total += value;
+    }
+  }
+  return total;
+};
 
 interface OpenAIChatCompletionsRequest {
   model?: string;
@@ -88,6 +109,8 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
   // OpenAI-compatible Chat Completions endpoint
   app.post('/chat/completions', async (req: express.Request, res: express.Response) => {
     try {
+      const store = requestStorage.getStore();
+      const requestId = store?.id ?? uuidv4();
       const body = (req.body ?? {}) as OpenAIChatCompletionsRequest;
       if (!Array.isArray(body.messages)) {
         throw new Error('`messages` must be an array.');
@@ -103,6 +126,26 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
       const temperature = body.temperature ?? undefined;
       const topP = body.top_p ?? undefined;
       const maxOutputTokens = body.max_tokens ?? undefined;
+      const tools: Tool[] = body.tools ? convertOpenAIToolsToGemini(body.tools) : [];
+      const allowedFunctionNames =
+        tools.flatMap(tool => tool.functionDeclarations ?? [])
+          .map(fd => fd?.name)
+          .filter((name): name is string => Boolean(name));
+      const toolConfig: ToolConfig | undefined =
+        tools.length > 0
+          ? {
+              functionCallingConfig: {
+                mode: FunctionCallingConfigMode.ANY,
+                ...(allowedFunctionNames.length > 0 && { allowedFunctionNames }),
+              },
+            }
+          : undefined;
+      const automaticFunctionCalling: AutomaticFunctionCallingConfig | undefined =
+        tools.length > 0
+          ? {
+              disable: false,
+            }
+          : undefined;
 
       const created = Math.floor(Date.now() / 1000);
       const id = `chatcmpl_${uuidv4()}`;
@@ -118,8 +161,6 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
 
         try {
           // Use rawGenerateContentStream to bypass system prompt injection
-          const tools = body.tools ? convertOpenAIToolsToGemini(body.tools) : [];
-
           const streamGen = await config.getGeminiClient().rawGenerateContentStream(
             contents,
             {
@@ -127,6 +168,8 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
               topP,
               maxOutputTokens,
               ...(tools.length > 0 && { tools }),
+              ...(toolConfig && { toolConfig }),
+              ...(automaticFunctionCalling && { automaticFunctionCalling }),
             },
             new AbortController().signal,
             model,
@@ -136,11 +179,21 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
           let firstChunk = true;
           let hasFunctionCall = false;
           let functionCallsData: any[] = [];
+          let usageMetadata: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number } | undefined;
 
           for await (const chunk of streamGen) {
             // Check for function calls first
             const parts = chunk.candidates?.[0]?.content?.parts || [];
             const funcCalls = parts.filter(p => 'functionCall' in p && p.functionCall);
+
+            const chunkUsage = (chunk as any).usageMetadata;
+            if (chunkUsage) {
+              usageMetadata = {
+                promptTokenCount: chunkUsage.promptTokenCount ?? usageMetadata?.promptTokenCount,
+                candidatesTokenCount: chunkUsage.candidatesTokenCount ?? usageMetadata?.candidatesTokenCount,
+                totalTokenCount: chunkUsage.totalTokenCount ?? usageMetadata?.totalTokenCount,
+              };
+            }
 
             if (funcCalls.length > 0) {
               hasFunctionCall = true;
@@ -234,6 +287,13 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
           // @ts-ignore
           res.flush && res.flush();
           res.write('data: [DONE]\n\n');
+          const usageTotal = usageMetadata
+            ? usageMetadata.totalTokenCount ?? sumTokenCounts(usageMetadata.promptTokenCount, usageMetadata.candidatesTokenCount)
+            : undefined;
+          const usageLog = usageMetadata
+            ? `prompt=${formatTokenCount(usageMetadata.promptTokenCount)} completion=${formatTokenCount(usageMetadata.candidatesTokenCount)} total=${formatTokenCount(usageTotal)}`
+            : 'prompt=unknown completion=unknown total=unknown';
+          logger.info(`${LOG_PREFIX}[${requestId}] Tokens usage ${usageLog}`);
           res.end();
         } catch (err) {
           const errorPayload = {
@@ -247,7 +307,6 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
       }
 
       // Non-streaming path - Use rawGenerateContent to bypass system prompt injection
-      const tools = body.tools ? convertOpenAIToolsToGemini(body.tools) : [];
 
       const response = await config
         .getGeminiClient()
@@ -258,6 +317,8 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
             topP,
             maxOutputTokens,
             ...(tools.length > 0 && { tools }),
+            ...(toolConfig && { toolConfig }),
+            ...(automaticFunctionCalling && { automaticFunctionCalling }),
           },
           new AbortController().signal,
           model
@@ -279,6 +340,11 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
             total_tokens: usage.totalTokenCount ?? null,
           }
         : undefined;
+
+      const nonStreamUsageLog = usage
+        ? `prompt=${formatTokenCount(usage.promptTokenCount)} completion=${formatTokenCount(usage.candidatesTokenCount)} total=${formatTokenCount(usage.totalTokenCount ?? sumTokenCounts(usage.promptTokenCount, usage.candidatesTokenCount))}`
+        : 'prompt=unknown completion=unknown total=unknown';
+      logger.info(`${LOG_PREFIX}[${requestId}] Tokens usage ${nonStreamUsageLog}`);
 
       // Check if there are functionCalls - supports parallel calls
       const firstCandidate = response.candidates?.[0];
@@ -331,8 +397,8 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
   // ✅ OpenAI Responses API endpoint (2025 new API)
   app.post('/responses', async (req: express.Request, res: express.Response) => {
     const store = requestStorage.getStore();
-    const requestId = store?.id || 'unknown-id';
-    logger.info(`[API_PROXY][${requestId}] Handling POST /v1/responses`);
+    const requestId = store?.id ?? uuidv4();
+    logger.info(`${LOG_PREFIX}[${requestId}] Handling POST /v1/responses`);
     try {
       const body = (req.body ?? {}) as OpenAIResponsesRequest;
       const model = mapOpenAIModelToGemini(body.model);
@@ -345,13 +411,35 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
 
       const responseId = `resp_${uuidv4()}`;
       logger.info(
-        `[API_PROXY][${requestId}] Requested model: ${body.model ?? 'default'} | mapped model: ${model} | stream=${stream}`,
+        `${LOG_PREFIX}[${requestId}] Requested model: ${body.model ?? 'default'} | mapped model: ${model} | stream=${stream}`,
       );
+      const tools: Tool[] = body.tools ? convertOpenAIToolsToGemini(body.tools) : [];
+      const allowedFunctionNames =
+        tools.flatMap(tool => tool.functionDeclarations ?? [])
+          .map(fd => fd?.name)
+          .filter((name): name is string => Boolean(name));
+      const toolConfig: ToolConfig | undefined =
+        tools.length > 0
+          ? {
+              functionCallingConfig: {
+                mode: FunctionCallingConfigMode.ANY,
+                ...(allowedFunctionNames.length > 0 && { allowedFunctionNames }),
+              },
+            }
+          : undefined;
+      const automaticFunctionCalling: AutomaticFunctionCallingConfig | undefined =
+        tools.length > 0
+          ? {
+              disable: false,
+            }
+          : undefined;
       const commonParams = {
         temperature: body.temperature ?? undefined,
         topP: body.top_p ?? undefined,
         maxOutputTokens: body.max_output_tokens ?? undefined,
-        tools: body.tools ? convertOpenAIToolsToGemini(body.tools) : [],
+        ...(tools.length > 0 && { tools }),
+        ...(toolConfig && { toolConfig }),
+        ...(automaticFunctionCalling && { automaticFunctionCalling }),
         systemInstruction,
       };
 
@@ -378,7 +466,7 @@ export function registerOpenAIEndpoints(app: express.Router, config: Config) {
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Bad request';
-      logger.error(`[API_PROXY] Error on /v1/responses: ${message}`);
+      logger.error(`${LOG_PREFIX} Error on /v1/responses: ${message}`);
       res.status(400).json({ error: { message } });
     }
   });
@@ -482,14 +570,14 @@ async function handleStreamingResponse(
     } catch (err) {
       if (shouldFallbackToFlash(err, currentModel)) {
         logger.warn(
-          `[API_PROXY][${requestId}] Model ${currentModel} unavailable (404). Falling back to ${DEFAULT_GEMINI_FLASH_MODEL}.`,
+          `${LOG_PREFIX}[${requestId}] Model ${currentModel} unavailable (404). Falling back to ${DEFAULT_GEMINI_FLASH_MODEL}.`,
         );
         currentModel = DEFAULT_GEMINI_FLASH_MODEL;
         continue;
       }
 
       const message = err instanceof Error ? err.message : 'Stream error';
-      logger.error(`[API_PROXY][${requestId}] Failed to start streaming: ${message}`);
+      logger.error(`${LOG_PREFIX}[${requestId}] Failed to start streaming: ${message}`);
       writeEvent(createStreamingEvent('response.created', { responseId }));
       writeEvent(createStreamingEvent('response.error', { responseId, message }));
       writeEvent(
@@ -677,7 +765,7 @@ async function handleStreamingResponse(
     }
   } catch (err) {
     streamError = err instanceof Error ? err : new Error('Stream error');
-    logger.error(`[API_PROXY][${requestId}] Streaming error: ${streamError.message}`);
+    logger.error(`${LOG_PREFIX}[${requestId}] Streaming error: ${streamError.message}`);
     writeEvent(createStreamingEvent('response.error', { responseId, message: streamError.message }));
   }
 
@@ -722,6 +810,14 @@ async function handleStreamingResponse(
   const resultFunctionCall = functionCallState
     ? { ...functionCallState, arguments: functionCallState.argsText }
     : undefined;
+
+  const usageTotal = usageMetadata
+    ? usageMetadata.totalTokenCount ?? sumTokenCounts(usageMetadata.promptTokenCount, usageMetadata.candidatesTokenCount)
+    : undefined;
+  const usageLog = usageMetadata
+    ? `prompt=${formatTokenCount(usageMetadata.promptTokenCount)} completion=${formatTokenCount(usageMetadata.candidatesTokenCount)} total=${formatTokenCount(usageTotal)}`
+    : 'prompt=unknown completion=unknown total=unknown';
+  logger.info(`${LOG_PREFIX}[${requestId}] Tokens usage ${usageLog}`);
 
   writeEvent(
     createStreamingEvent('response.done', {
@@ -781,6 +877,7 @@ async function handleNonStreamingResponse(
       );
 
       const text = getResponseText(geminiResponse);
+      const usageMeta = geminiResponse.usageMetadata;
       const result = {
         id: responseId,
         object: 'response',
@@ -794,23 +891,27 @@ async function handleNonStreamingResponse(
           },
         ],
         usage: {
-          input_tokens: geminiResponse.usageMetadata?.promptTokenCount || 0,
-          output_tokens: geminiResponse.usageMetadata?.candidatesTokenCount || 0,
+          input_tokens: usageMeta?.promptTokenCount || 0,
+          output_tokens: usageMeta?.candidatesTokenCount || 0,
         },
       };
+      const usageLog = usageMeta
+        ? `prompt=${formatTokenCount(usageMeta.promptTokenCount)} completion=${formatTokenCount(usageMeta.candidatesTokenCount)} total=${formatTokenCount(sumTokenCounts(usageMeta.promptTokenCount, usageMeta.candidatesTokenCount))}`
+        : 'prompt=unknown completion=unknown total=unknown';
+      logger.info(`${LOG_PREFIX}[${requestId}] Tokens usage ${usageLog}`);
       res.status(200).json(result);
       return;
     } catch (err) {
       if (shouldFallbackToFlash(err, currentModel)) {
         logger.warn(
-          `[API_PROXY][${requestId}] Model ${currentModel} unavailable (404). Falling back to ${DEFAULT_GEMINI_FLASH_MODEL}.`,
+          `${LOG_PREFIX}[${requestId}] Model ${currentModel} unavailable (404). Falling back to ${DEFAULT_GEMINI_FLASH_MODEL}.`,
         );
         currentModel = DEFAULT_GEMINI_FLASH_MODEL;
         continue;
       }
 
       const message = err instanceof Error ? err.message : 'Failed to generate response';
-      logger.error(`[API_PROXY][${requestId}] Non-streaming error: ${message}`);
+      logger.error(`${LOG_PREFIX}[${requestId}] Non-streaming error: ${message}`);
       res.status(400).json({ error: { message } });
       return;
     }

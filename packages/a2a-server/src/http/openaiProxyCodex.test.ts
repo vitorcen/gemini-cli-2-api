@@ -215,7 +215,15 @@ describe('OpenAI Responses API compatibility', () => {
     const stubConfig = {
       getGeminiClient() {
         return {
-          rawGenerateContentStream: async function* () {
+          rawGenerateContentStream: async function* (
+            _contents: unknown,
+            generationConfig: Record<string, any>,
+          ) {
+            expect(generationConfig['tools']?.length).toBeGreaterThan(0);
+            const fnConfig = generationConfig['toolConfig']?.functionCallingConfig;
+            expect(fnConfig?.mode).toBe('ANY');
+            expect(fnConfig?.allowedFunctionNames).toContain('list_dir');
+            expect(generationConfig['automaticFunctionCalling']?.disable).toBe(false);
             const argsSequence = [
               { path: '/workspace', offset: 0 },
               { path: '/workspace', offset: 0, limit: 20 },
@@ -244,7 +252,15 @@ describe('OpenAI Responses API compatibility', () => {
               };
             }
           },
-          rawGenerateContent: async () => {
+          rawGenerateContent: async (
+            _contents: unknown,
+            generationConfig: Record<string, any>,
+          ) => {
+            expect(generationConfig['tools']?.length).toBeGreaterThan(0);
+            const fnConfig = generationConfig['toolConfig']?.functionCallingConfig;
+            expect(fnConfig?.mode).toBe('ANY');
+            expect(fnConfig?.allowedFunctionNames).toContain('list_dir');
+            expect(generationConfig['automaticFunctionCalling']?.disable).toBe(false);
             throw new Error('Not implemented in stub');
           },
         };

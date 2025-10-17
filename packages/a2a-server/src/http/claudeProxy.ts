@@ -9,6 +9,20 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Config } from '@google/gemini-cli-core';
 import { DEFAULT_GEMINI_FLASH_MODEL, DEFAULT_GEMINI_MODEL } from '@google/gemini-cli-core';
 import type { Content } from '@google/genai';
+import { logger } from '../utils/logger.js';
+
+const formatTokenCount = (value?: number): string =>
+  typeof value === 'number' ? value.toLocaleString('en-US') : '0';
+
+const sumTokenCounts = (...values: Array<number | undefined>): number => {
+  let total = 0;
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      total += value;
+    }
+  }
+  return total;
+};
 
 interface ClaudeContentBlock {
   type: 'text' | 'tool_use' | 'tool_result';
@@ -124,6 +138,11 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
   // Claude-compatible /v1/messages endpoint
   app.post('/messages', async (req: express.Request, res: express.Response) => {
     try {
+      const headerRequestId = req.headers['x-request-id'];
+      const requestId =
+        typeof headerRequestId === 'string' && headerRequestId.trim().length > 0
+          ? headerRequestId
+          : uuidv4();
       const body = (req.body ?? {}) as ClaudeRequest;
       if (!Array.isArray(body.messages)) {
         throw new Error('`messages` must be an array.');
@@ -371,6 +390,11 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
             usage: { output_tokens: outputTokens },
           });
 
+          const totalTokens = sumTokenCounts(inputTokens, outputTokens);
+          logger.info(
+            `[CLAUDE_PROXY][${requestId}] Tokens usage prompt=${formatTokenCount(inputTokens)} completion=${formatTokenCount(outputTokens)} total=${formatTokenCount(totalTokens)}`,
+          );
+
           // Send message_stop event
           res.write(`event: message_stop\n`);
           res.write(`data: ${JSON.stringify({
@@ -444,6 +468,11 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
             output_tokens: usage?.candidatesTokenCount || 0,
           },
         };
+
+        const totalTokens = sumTokenCounts(usage?.promptTokenCount, usage?.candidatesTokenCount);
+        logger.info(
+          `[CLAUDE_PROXY][${requestId}] Tokens usage prompt=${formatTokenCount(usage?.promptTokenCount)} completion=${formatTokenCount(usage?.candidatesTokenCount)} total=${formatTokenCount(totalTokens)}`,
+        );
 
         return res.status(200).json(result);
       }

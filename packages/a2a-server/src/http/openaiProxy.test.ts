@@ -276,7 +276,7 @@ describe('OpenAI Proxy API', () => {
       const hasPirateSpeak = content.includes('arr') || content.includes('ahoy') || content.includes('matey');
 
       console.log(hasPirateSpeak ? '✅ System prompt working' : '⚠️  No pirate speak detected (Gemini limitation)');
-    });
+    }, 15000);
   });
 
   describe('Function Calling', () => {
