@@ -96,7 +96,7 @@ export async function createApp() {
     let expressApp = express();
 
     // ✅ Set 100mb limit GLOBALLY before any routes or middleware
-    // This will be used by ALL routes (A2A + API proxy)
+    // Also capture raw request body for early diagnostics (e.g., verify tools structure before any mutation)
     expressApp.use(express.json({ limit: '100mb' }));
     const appBuilder = new A2AExpressApp(requestHandler);
     appBuilder.setupRoutes(a2aApp, '');

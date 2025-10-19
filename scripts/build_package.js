@@ -18,6 +18,7 @@
 // limitations under the License.
 
 import { execSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -26,8 +27,15 @@ if (!process.cwd().includes('packages')) {
   process.exit(1);
 }
 
-// build typescript files
-execSync('tsc --build', { stdio: 'inherit' });
+// build typescript files (resolve local TypeScript binary)
+try {
+  const require = createRequire(import.meta.url);
+  const tscPath = require.resolve('typescript/bin/tsc');
+  execSync(`node ${tscPath} --build`, { stdio: 'inherit' });
+} catch (e) {
+  // fallback to PATH tsc if resolution fails
+  execSync('tsc --build', { stdio: 'inherit' });
+}
 
 // copy .{md,json} files
 execSync('node ../../scripts/copy_files.js', { stdio: 'inherit' });

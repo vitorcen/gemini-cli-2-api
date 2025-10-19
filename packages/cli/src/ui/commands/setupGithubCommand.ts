@@ -6,7 +6,9 @@
 
 import path from 'node:path';
 import * as fs from 'node:fs';
-import { Writable } from 'node:stream';
+import { Readable } from 'node:stream';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
+import { pipeline } from 'node:stream/promises';
 import { ProxyAgent } from 'undici';
 
 import type { CommandContext } from '../../ui/commands/types.js';
@@ -173,7 +175,9 @@ export const setupGithubCommand: SlashCommand = {
             flush: true,
           });
 
-          await body.pipeTo(Writable.toWeb(fileStream));
+          // Convert Web ReadableStream to Node Readable and pipeline to file stream
+          const nodeReadable = Readable.fromWeb(body as unknown as WebReadableStream<any>);
+          await pipeline(nodeReadable, fileStream);
         })(),
       );
     }

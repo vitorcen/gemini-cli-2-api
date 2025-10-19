@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content, Tool, FunctionDeclaration, Part } from '@google/genai';
+import type { Content, Tool, FunctionDeclaration, Part, Schema } from '@google/genai';
+import { Type } from '@google/genai';
 
 export interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -24,163 +25,252 @@ export interface OpenAIMessage {
   tool_call_id?: string;
 }
 
-export interface OpenAITool {
+type OpenAIFunctionTool = {
   type: 'function';
   function: {
     name: string;
     description?: string;
-    parameters?: Record<string, any>;
+    parameters?: Schema;
+  };
+};
+
+type OpenAILocalShellTool = {
+  type: 'local_shell';
+  name?: string;
+  description?: string;
+  parameters?: Schema;
+};
+
+type OpenAIWebSearchTool = {
+  type: 'web_search';
+  name?: string;
+  description?: string;
+  parameters?: Schema;
+};
+
+type OpenAICustomTool = {
+  type: 'custom';
+  name: string;
+  description?: string;
+  format?: Record<string, unknown>;
+  parameters?: Schema;
+};
+
+type OpenAIGenericTool = {
+  type: string;
+  name?: string;
+  description?: string;
+  parameters?: Schema;
+  [key: string]: unknown;
+};
+
+export type OpenAITool =
+  | OpenAIFunctionTool
+  | OpenAILocalShellTool
+  | OpenAIWebSearchTool
+  | OpenAICustomTool
+  | OpenAIGenericTool;
+
+function structureToolResponse(
+  functionName: string | undefined,
+  content: unknown,
+): Record<string, unknown> {
+  const name = functionName || 'unknown';
+
+  if (typeof content !== 'string') {
+    return content as Record<string, unknown>;
+  }
+
+  if (name === 'apply_patch' || name === 'write_file') {
+    if (content.includes('verification failed')) {
+      return {
+        status: 'error',
+        error: content,
+        suggestion: 'The patch failed to apply. The file content may have changed. Please read the file again to get the latest version before creating a new patch.',
+      };
+    }
+    return {
+      status: 'success',
+      summary: content,
+    };
+  }
+
+  if (name === 'shell' || name === 'local_shell') {
+    if (/Exit code: [1-9]/.test(content)) {
+      return {
+        status: 'error',
+        error: content,
+      };
+    }
+    return {
+      status: 'success',
+      stdout: content,
+    };
+  }
+
+  if (name === 'read_file') {
+    return {
+      status: 'success',
+      content: content,
+      bytes: content.length,
+    };
+  }
+
+  if (name === 'list_dir') {
+    return {
+      status: 'success',
+      files: content.split('\n').filter(f => f.length > 0),
+    };
+  }
+
+  if (/(error|failed|not found)/i.test(content)) {
+      return {
+        status: 'error',
+        error: content,
+      };
+  }
+
+  return {
+    result: content,
   };
 }
 
-/**
- * Convert OpenAI message format to Gemini Contents format
- *
- * Core principle: Maintain complete conversation history without losing information
- */
-export function convertOpenAIMessagesToGemini(
-  messages: OpenAIMessage[]
-): { contents: Content[]; systemInstruction?: string } {
-  const contents: Content[] = [];
-  let systemInstruction = '';
+class MessageProcessor {
+  private readonly messages: OpenAIMessage[];
+  private currentIndex = 0;
+  private readonly toolCallMap = new Map<string, string>();
+  private readonly contents: Content[] = [];
+  private systemInstruction = '';
 
-  // Maintain tool_call_id -> function_name mapping
-  const toolCallMap = new Map<string, string>();
+  constructor(messages: OpenAIMessage[]) {
+    this.messages = messages;
+  }
 
-  const normalizeContent = (value: OpenAIMessage['content']): string => {
-    if (value === null || value === undefined) {
-      return '';
+  process() {
+    while (this.currentIndex < this.messages.length) {
+      const msg = this.messages[this.currentIndex];
+      switch (msg.role) {
+        case 'system':
+          this.handleSystemMessage(msg);
+          this.currentIndex++;
+          break;
+        case 'user':
+          this.handleUserMessage(msg);
+          this.currentIndex++;
+          break;
+        case 'assistant':
+          this.handleAssistantMessage(msg);
+          this.currentIndex++;
+          break;
+        case 'tool':
+          this.handleToolMessages();
+          break;
+      }
     }
-    if (typeof value === 'string') {
-      return value;
+    return {
+      contents: this.contents,
+      systemInstruction: this.systemInstruction.trim() || undefined,
+    };
+  }
+
+  private handleSystemMessage(msg: OpenAIMessage) {
+    const systemContent = msg.content;
+    if (typeof systemContent === 'string') {
+      this.systemInstruction += systemContent + '\n\n';
+    } else if (systemContent) {
+      this.systemInstruction += JSON.stringify(systemContent) + '\n\n';
     }
-    if (Array.isArray(value)) {
-      return value
-        .map(part => {
-          if (typeof part === 'string') return part;
-          if (part && typeof part === 'object') {
-            if ('text' in part && typeof part.text === 'string') {
-              return part.text;
-            }
-            return JSON.stringify(part);
-          }
-          return '';
-        })
-        .filter(Boolean)
+  }
+
+  private extractTextFromMessageContent(content: OpenAIMessage['content']): string {
+    if (typeof content === 'string') {
+      return content;
+    }
+    if (Array.isArray(content)) {
+      return content
+        .map(part => (part.text ? part.text : ''))
         .join('\n');
     }
-    if (typeof value === 'object') {
-      return JSON.stringify(value);
+    if (content && typeof content === 'object') {
+      return JSON.stringify(content);
     }
-    return String(value);
-  };
+    return '';
+  }
 
-  for (const msg of messages) {
-    if (msg.role === 'system') {
-      // Collect system prompts
-      systemInstruction += normalizeContent(msg.content) + '\n\n';
-    } else if (msg.role === 'user') {
-      // By the time the message gets here, the `content` is guaranteed to be a string
-      // thanks to the `parseOpenAIInput` function.
-      const textContent = normalizeContent(msg.content);
-
-      // ✅ If last content was also user, merge them to meet Gemini API requirements.
-      const lastContent = contents[contents.length - 1];
-      if (lastContent && lastContent.role === 'user' && lastContent.parts) {
-        lastContent.parts.push({ text: textContent });
-      } else {
-        contents.push({
-          role: 'user',
-          parts: [{ text: textContent }]
-        });
+  private handleUserMessage(msg: OpenAIMessage) {
+    const textContent = this.extractTextFromMessageContent(msg.content);
+    if (!textContent) {
+      return;
+    }
+    const lastContent = this.contents[this.contents.length - 1];
+    if (lastContent?.role === 'user' && lastContent.parts && lastContent.parts.length > 0) {
+      const lastPart = lastContent.parts[lastContent.parts.length - 1];
+      if (lastPart && 'text' in lastPart) {
+        lastPart.text += '\n' + textContent;
+        return;
       }
-    } else if (msg.role === 'assistant') {
-      // ✅ Critical fix: Preserve assistant messages
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        // Assistant called tools
-        const parts = [];
+    }
+    this.contents.push({ role: 'user', parts: [{ text: textContent }] });
+  }
 
-        // If there is text content, add text first
-        const normalizedAssistantText = normalizeContent(msg.content);
-        if (normalizedAssistantText) {
-          parts.push({ text: normalizedAssistantText });
-        }
-
-        // Add tool calls and record mapping
-        for (const toolCall of msg.tool_calls) {
-          toolCallMap.set(toolCall.id, toolCall.function.name);
-
-          parts.push({
-            functionCall: {
-              name: toolCall.function.name,
-              args: JSON.parse(toolCall.function.arguments)
-            }
-          });
-        }
-
-        contents.push({
-          role: 'model',
-          parts
-        });
-      } else {
-        // Normal text response
-        contents.push({
-          role: 'model',
-          parts: [{ text: normalizeContent(msg.content) }]
-        });
+  private handleAssistantMessage(msg: OpenAIMessage) {
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      const parts: Part[] = [];
+      if (msg.content && typeof msg.content === 'string') {
+        parts.push({ text: msg.content });
       }
-    } else if (msg.role === 'tool') {
-      // Tool call result - Use mapping to find function name
-      const functionName = msg.tool_call_id ? toolCallMap.get(msg.tool_call_id) : undefined;
-
-      let parsedResponse: Record<string, unknown> | null = null;
-      let summaryText = normalizeContent(msg.content);
-
-      if (typeof msg.content === 'string') {
-        try {
-          const asJson = JSON.parse(msg.content);
-          if (asJson && typeof asJson === 'object') {
-            parsedResponse = asJson as Record<string, unknown>;
-          } else {
-            parsedResponse = { result: asJson };
-          }
-        } catch {
-          parsedResponse = { result: msg.content };
-        }
-      } else if (Array.isArray(msg.content)) {
-        parsedResponse = { result: summaryText };
-      } else if (msg.content && typeof msg.content === 'object') {
-        parsedResponse = msg.content as Record<string, unknown>;
-      } else if (summaryText) {
-        parsedResponse = { result: summaryText };
-      } else {
-        parsedResponse = { result: '' };
-      }
-
-      const parts: Part[] = [{
-        functionResponse: {
-          name: functionName || 'unknown',
-          response: parsedResponse
-        }
-      }];
-
-      if (summaryText) {
+      for (const toolCall of msg.tool_calls) {
+        this.toolCallMap.set(toolCall.id, toolCall.function.name);
         parts.push({
-          text: `Tool ${functionName || 'response'}: ${summaryText}`
+          functionCall: {
+            name: toolCall.function.name,
+            args: JSON.parse(toolCall.function.arguments),
+          },
         });
       }
-
-      contents.push({
-        role: 'user',
-        parts
+      this.contents.push({ role: 'model', parts });
+    } else {
+      this.contents.push({
+        role: 'model',
+        parts: [{ text: msg.content as string }],
       });
     }
   }
 
-  return {
-    contents,
-    systemInstruction: systemInstruction.trim() || undefined
-  };
+  private handleToolMessages() {
+    const toolParts: Part[] = [];
+    while (
+      this.currentIndex < this.messages.length &&
+      this.messages[this.currentIndex].role === 'tool'
+    ) {
+      const toolMsg = this.messages[this.currentIndex];
+      const functionName = toolMsg.tool_call_id
+        ? this.toolCallMap.get(toolMsg.tool_call_id)
+        : undefined;
+      const response = structureToolResponse(functionName, toolMsg.content);
+
+      toolParts.push({
+        functionResponse: {
+          name: functionName || 'unknown',
+          response,
+        },
+      });
+      this.currentIndex++;
+    }
+
+    if (toolParts.length > 0) {
+      this.contents.push({
+        role: 'user', // Gemini requires tool responses to be in a 'user' role message
+        parts: toolParts,
+      });
+    }
+  }
+}
+
+export function convertOpenAIMessagesToGemini(
+  messages: OpenAIMessage[]
+): { contents: Content[]; systemInstruction?: string } {
+  return new MessageProcessor(messages).process();
 }
 
 /**
@@ -191,16 +281,201 @@ export function convertOpenAIToolsToGemini(tools: OpenAITool[]): Tool[] {
     return [];
   }
 
-  // Filter out built-in tools (like web_search) that don't have function field
-  const functionDeclarations: FunctionDeclaration[] = tools
-    .filter(tool => tool.function && tool.function.name)
-    .map(tool => ({
-      name: tool.function.name,
-      description: tool.function.description || '',
-      parameters: tool.function.parameters
-    }));
+  const functionDeclarations: FunctionDeclaration[] = [];
 
-  // If no function declarations, return empty array
+  const addFunctionDeclaration = (declaration: FunctionDeclaration | undefined) => {
+    if (!declaration) return;
+    if (!declaration.name) return;
+    functionDeclarations.push(declaration);
+  };
+
+  const toDescription = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.length > 0 ? value : undefined;
+
+  const toSchema = (value: unknown): Schema | undefined =>
+    value && typeof value === 'object' ? (value as Schema) : undefined;
+
+  const defaultInputSchema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      input: {
+        type: Type.STRING,
+        description: 'Freeform input payload.',
+      },
+    },
+    required: ['input'],
+  };
+
+  const defaultLocalShellSchema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      command: {
+        type: Type.ARRAY,
+        description: 'Command to execute, provided as an array of arguments.',
+        items: {
+          type: Type.STRING,
+        },
+      },
+      workdir: {
+        type: Type.STRING,
+        description: 'Optional working directory for the command.',
+      },
+      timeout_ms: {
+        type: Type.INTEGER,
+        description: 'Optional timeout in milliseconds.',
+      },
+      with_escalated_permissions: {
+        type: Type.BOOLEAN,
+        description: 'Run command with escalated permissions when true.',
+      },
+      justification: {
+        type: Type.STRING,
+        description: 'Justification required when requesting escalated permissions.',
+      },
+    },
+    required: ['command'],
+  };
+
+  const defaultWebSearchSchema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      query: {
+        type: Type.STRING,
+        description: 'Query string to search for.',
+      },
+    },
+    required: ['query'],
+  };
+
+  for (const tool of tools) {
+    if (!tool || typeof tool !== 'object') continue;
+
+    switch (tool.type) {
+      case 'function': {
+        const nested = (tool as OpenAIFunctionTool).function;
+        if (nested?.name) {
+          addFunctionDeclaration({
+            name: nested.name,
+            description: nested.description || '',
+            parameters: nested.parameters,
+          });
+        }
+        break;
+      }
+
+      case 'local_shell': {
+        const shellTool = tool as OpenAILocalShellTool;
+        const name = shellTool.name || 'local_shell';
+        addFunctionDeclaration({
+          name,
+          description:
+            toDescription(shellTool.description) ||
+            'Execute a shell command. Provide the command as an array of arguments.',
+          parameters: toSchema(shellTool.parameters) ?? defaultLocalShellSchema,
+        });
+        break;
+      }
+
+      case 'web_search': {
+        const searchTool = tool as OpenAIWebSearchTool;
+        const name = searchTool.name || 'web_search';
+        addFunctionDeclaration({
+          name,
+          description: toDescription(searchTool.description) || 'Search the web for the provided query.',
+          parameters: toSchema(searchTool.parameters) ?? defaultWebSearchSchema,
+        });
+        break;
+      }
+
+      case 'custom': {
+        const customTool = tool as OpenAICustomTool;
+        const name = customTool.name;
+        if (name) {
+          let description = toDescription(customTool.description) || '';
+
+          if (name === 'apply_patch' && customTool.format) {
+            description = `Use the \`apply_patch\` tool to edit files.
+Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+  IMPORTANT: Before using *** Add File, you should ALWAYS call read_file first to check if the file already exists. If it exists, use *** Update File instead.
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+May be immediately followed by *** Move to: <new path> if you want to rename the file.
+Then one or more "hunks", each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with:
+- " " (space) for unchanged context lines
+- "-" for deleted lines
+- "+" for added lines
+
+CRITICAL: For *** Add File operations, EVERY content line MUST start with "+".
+Example:
+*** Add File: hello.txt
++Hello, world!
++This is line 2
+
+For *** Update File operations, use space for context, - for deletions, + for additions:
+*** Update File: src/main.py
+@@
+ def greet():
+-    print("Hi")
++    print("Hello!")
+
+File paths must be ABSOLUTE, NEVER relative.
+
+Full example:
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch`;
+          }
+
+          addFunctionDeclaration({
+            name,
+            description: description || `Custom tool: ${name}`,
+            parameters: toSchema(customTool.parameters) ?? defaultInputSchema,
+          });
+        }
+        break;
+      }
+
+      default: {
+        const name =
+          'name' in tool && typeof tool.name === 'string' && tool.name.length > 0
+            ? tool.name
+            : undefined;
+        if (name) {
+          addFunctionDeclaration({
+            name,
+            description:
+              'description' in tool && typeof tool.description === 'string'
+                ? tool.description
+                : '',
+            parameters:
+              'parameters' in tool && tool.parameters
+                ? toSchema(tool.parameters)
+                : defaultInputSchema,
+          });
+        }
+      }
+    }
+  }
+
   if (functionDeclarations.length === 0) {
     return [];
   }

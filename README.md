@@ -87,14 +87,24 @@ Wait approximately **30 seconds** for the server to start.
 
 **Switch to Gemini**:
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:41242
-claude --model gemini-2.5-pro "Hello, Gemini!"
+ANTHROPIC_BASE_URL=http://127.0.0.1:41242 claude --model gemini-2.5-pro -c
 ```
 
 **Restore Claude**:
 ```bash
-unset ANTHROPIC_BASE_URL
-claude --model sonnet "Hello, Claude!"
+unset ANTHROPIC_BASE_URL && claude -c
+```
+
+### 4. Use Codex with Gemini (Experimental)
+
+**Switch to Gemini**:
+```bash
+CODEX_EXPERIMENTAL=1 OPENAI_BASE_URL="http://127.0.0.1:41242/v1" codex -m gemini-flash-latest
+```
+
+**Restore Codex**:
+```bash
+unset OPENAI_BASE_URL && codex
 ```
 
 ## API Endpoints
@@ -329,19 +339,29 @@ packages/a2a-server/src/http/
 cd packages/a2a-server
 USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
 
-# 2. Configure Claude CLI to use proxy
-export ANTHROPIC_BASE_URL=http://127.0.0.1:41242
+# 2. Use Gemini models with Claude CLI
+ANTHROPIC_BASE_URL=http://127.0.0.1:41242 claude --model gemini-2.5-pro
+ANTHROPIC_BASE_URL=http://127.0.0.1:41242 claude --model gemini-flash-latest /path/to/code "Review this code"
 
-# 3. Use Gemini models
-claude --model gemini-2.5-pro "Explain quantum computing"
-claude --model gemini-flash-latest /path/to/code "Review this code"
+# 3. Tool calling example
+ANTHROPIC_BASE_URL=http://127.0.0.1:41242 claude --model gemini-2.5-pro "What's the weather in Tokyo?"
 
-# 4. Tool calling example
-claude --model gemini-2.5-pro "What's the weather in Tokyo?"
-
-# 5. Restore Claude
-unset ANTHROPIC_BASE_URL
+# 4. Restore Claude
 claude --model sonnet "Hello Claude"
+```
+
+## Example: Codex CLI Workflow (Experimental)
+
+```bash
+# 1. Start proxy server
+cd packages/a2a-server
+USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
+
+# 2. Use Gemini models with Codex CLI
+CODEX_EXPERIMENTAL=1 OPENAI_BASE_URL="http://127.0.0.1:41242/v1" codex -m gemini-flash-latest
+
+# 3. Restore Codex
+unset OPENAI_BASE_URL && codex resume
 ```
 
 ## Example: OpenAI SDK

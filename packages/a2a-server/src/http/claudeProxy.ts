@@ -244,6 +244,9 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
 
         try {
           // Use CCPA mode with rawGenerateContentStream
+          logger.info(
+            `[CLAUDE_PROXY][${requestId}] Sending request model=${model} stream=true`,
+          );
           const streamGen = await config.getGeminiClient().rawGenerateContentStream(
             contents,
             {
@@ -260,7 +263,7 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
           let outputTokens = 0;
           let inputTokens = 0;
           let firstChunk = true;
-
+          
           const writeEvent = (event: string, data: object) => {
             res.write(`event: ${event}\n`);
             res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -300,7 +303,7 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
             const currentInputTokens = (chunkResp as any).usageMetadata?.promptTokenCount;
             if (currentInputTokens) {
               inputTokens = currentInputTokens;
-            }
+                          }
 
             // Send message_start on first chunk (with whatever token info we have)
             if (!messageStartSent && firstChunk) {
@@ -392,7 +395,7 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
 
           const totalTokens = sumTokenCounts(inputTokens, outputTokens);
           logger.info(
-            `[CLAUDE_PROXY][${requestId}] Tokens usage prompt=${formatTokenCount(inputTokens)} completion=${formatTokenCount(outputTokens)} total=${formatTokenCount(totalTokens)}`,
+            `[CLAUDE_PROXY][${requestId}] Tokens usage model=${model} prompt=${formatTokenCount(inputTokens)} completion=${formatTokenCount(outputTokens)} total=${formatTokenCount(totalTokens)}`,
           );
 
           // Send message_stop event
@@ -416,6 +419,9 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
         }
       } else {
         // Non-streaming response - Using CCPA mode with rawGenerateContent
+        logger.info(
+          `[CLAUDE_PROXY][${requestId}] Sending request model=${model} stream=false`,
+        );
         const response = await config.getGeminiClient().rawGenerateContent(
           contents,
           {
@@ -430,7 +436,7 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
         );
 
         const usage = (response as any).usageMetadata;
-        const content: any[] = [];
+                const content: any[] = [];
 
         // Filter thought parts first
         const parts = filterThoughtParts(response.candidates?.[0]?.content?.parts || []);
@@ -471,7 +477,7 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
 
         const totalTokens = sumTokenCounts(usage?.promptTokenCount, usage?.candidatesTokenCount);
         logger.info(
-          `[CLAUDE_PROXY][${requestId}] Tokens usage prompt=${formatTokenCount(usage?.promptTokenCount)} completion=${formatTokenCount(usage?.candidatesTokenCount)} total=${formatTokenCount(totalTokens)}`,
+          `[CLAUDE_PROXY][${requestId}] Tokens usage model=${model} prompt=${formatTokenCount(usage?.promptTokenCount)} completion=${formatTokenCount(usage?.candidatesTokenCount)} total=${formatTokenCount(totalTokens)}`,
         );
 
         return res.status(200).json(result);
