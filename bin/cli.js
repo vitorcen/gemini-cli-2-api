@@ -11,6 +11,17 @@ const serverPath = join(__dirname, '..', 'packages', 'a2a-server', 'dist', 'src'
 const pidFile = join(tmpdir(), 'gemini-cli-2-api.pid');
 const logFile = join(tmpdir(), 'gemini-cli-2-api.log');
 
+// Read version from package.json
+const packageJsonPath = join(__dirname, '..', 'package.json');
+const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+const version = packageJson.version;
+
+// Version message
+if (process.argv.includes('-v') || process.argv.includes('--version')) {
+  console.log(`gemini-cli-2-api v${version}`);
+  process.exit(0);
+}
+
 // Help message
 if (process.argv.includes('-h') || process.argv.includes('--help')) {
   console.log(`
@@ -21,6 +32,7 @@ Usage:
   gemini-cli-2-api start    Start the proxy server as background service
   gemini-cli-2-api stop     Stop the background service
   gemini-cli-2-api status   Check server status
+  gemini-cli-2-api -v       Show version number
   gemini-cli-2-api -h       Show this help message
 
 Server Configuration:
