@@ -10,6 +10,9 @@ import type { Config } from '@google/gemini-cli-core';
 import { DEFAULT_GEMINI_FLASH_MODEL, DEFAULT_GEMINI_MODEL } from '@google/gemini-cli-core';
 import type { Content } from '@google/genai';
 import { logger } from '../utils/logger.js';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 const formatTokenCount = (value?: number): string =>
   typeof value === 'number' ? value.toLocaleString('en-US') : '0';
@@ -134,6 +137,29 @@ function filterThoughtParts(parts: any[]): any[] {
     });
 }
 
+/**
+ * Write debug log when DEBUG_LOG_REQUESTS is set
+ */
+async function writeDebugLog(
+  requestId: string,
+  type: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  if (!process.env['DEBUG_LOG_REQUESTS']) {
+    return;
+  }
+
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `claude-proxy-${type}-${requestId}-${timestamp}.json`;
+    const filepath = path.join(os.tmpdir(), filename);
+    await fs.writeFile(filepath, JSON.stringify(data, null, 2));
+    logger.debug(`[CLAUDE_PROXY][${requestId}] Debug log written to: ${filepath}`);
+  } catch (error) {
+    logger.error(`[CLAUDE_PROXY][${requestId}] Failed to write debug log:`, error);
+  }
+}
+
 export function registerClaudeEndpoints(app: express.Router, defaultConfig: Config) {
   // Claude-compatible /v1/messages endpoint
   app.post('/messages', async (req: express.Request, res: express.Response) => {
@@ -144,6 +170,12 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
           ? headerRequestId
           : uuidv4();
       const body = (req.body ?? {}) as ClaudeRequest;
+
+      // Debug: Log tools if present
+      if (body.tools !== undefined) {
+        logger.debug(`[CLAUDE_PROXY][${requestId}] Received tools: ${JSON.stringify(body.tools)}`);
+      }
+
       if (!Array.isArray(body.messages)) {
         throw new Error('`messages` must be an array.');
       }
@@ -225,7 +257,7 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
         systemInstruction = { parts: [{ text: systemContent }], role: 'system' };
       }
 
-      const tools = body.tools
+      const tools = body.tools && body.tools.length > 0
         ? [{ functionDeclarations: body.tools.map(t => ({
             name: t.name,
             description: t.description || '',
@@ -244,8 +276,9 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
 
         try {
           // Use CCPA mode with rawGenerateContentStream
+          const textSizeKB = (Buffer.byteLength(JSON.stringify(contents), 'utf8') / 1024).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           logger.info(
-            `[CLAUDE_PROXY][${requestId}] Sending request model=${model} stream=true`,
+            `[CLAUDE_PROXY][${requestId}] Sending request model=${model} stream=true text=${textSizeKB}KB`,
           );
           const streamGen = await config.getGeminiClient().rawGenerateContentStream(
             contents,
@@ -297,8 +330,14 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
 
           let accumulatedText = '';
           let messageStartSent = false;
+          const debugChunks: any[] = [];
 
           for await (const chunkResp of streamGen) {
+            // Collect chunks for debug logging
+            if (process.env['DEBUG_LOG_REQUESTS']) {
+              debugChunks.push(chunkResp);
+            }
+
             // Update input tokens if available
             const currentInputTokens = (chunkResp as any).usageMetadata?.promptTokenCount;
             if (currentInputTokens) {
@@ -395,7 +434,7 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
 
           const totalTokens = sumTokenCounts(inputTokens, outputTokens);
           logger.info(
-            `[CLAUDE_PROXY][${requestId}] Tokens usage model=${model} prompt=${formatTokenCount(inputTokens)} completion=${formatTokenCount(outputTokens)} total=${formatTokenCount(totalTokens)}`,
+            `[CLAUDE_PROXY][${requestId}] model=${model} usage: prompt=${formatTokenCount(inputTokens)} completion=${formatTokenCount(outputTokens)} total=${formatTokenCount(totalTokens)} tokens`,
           );
 
           // Send message_stop event
@@ -403,6 +442,30 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
           res.write(`data: ${JSON.stringify({
             type: 'message_stop',
           })}\n\n`);
+
+          // Write debug log with all chunks if DEBUG_LOG_REQUESTS is set
+          await writeDebugLog(requestId, 'stream', {
+            request: {
+              contents,
+              config: {
+                temperature,
+                topP,
+                maxOutputTokens,
+                tools,
+                systemInstruction,
+              },
+              model,
+            },
+            response: {
+              chunks: debugChunks,
+              accumulatedText,
+              usage: {
+                inputTokens,
+                outputTokens,
+                totalTokens: sumTokenCounts(inputTokens, outputTokens),
+              },
+            },
+          });
 
           return res.end();
         } catch (err) {
@@ -419,8 +482,9 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
         }
       } else {
         // Non-streaming response - Using CCPA mode with rawGenerateContent
+        const textSizeKB = (Buffer.byteLength(JSON.stringify(contents), 'utf8') / 1024).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         logger.info(
-          `[CLAUDE_PROXY][${requestId}] Sending request model=${model} stream=false`,
+          `[CLAUDE_PROXY][${requestId}] Sending request model=${model} stream=false text=${textSizeKB}KB`,
         );
         const response = await config.getGeminiClient().rawGenerateContent(
           contents,
@@ -477,8 +541,27 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
 
         const totalTokens = sumTokenCounts(usage?.promptTokenCount, usage?.candidatesTokenCount);
         logger.info(
-          `[CLAUDE_PROXY][${requestId}] Tokens usage model=${model} prompt=${formatTokenCount(usage?.promptTokenCount)} completion=${formatTokenCount(usage?.candidatesTokenCount)} total=${formatTokenCount(totalTokens)}`,
+          `[CLAUDE_PROXY][${requestId}] model=${model} usage: prompt=${formatTokenCount(usage?.promptTokenCount)} completion=${formatTokenCount(usage?.candidatesTokenCount)} total=${formatTokenCount(totalTokens)} tokens`,
         );
+
+        // Write debug log if DEBUG_LOG_REQUESTS is set
+        await writeDebugLog(requestId, 'non-stream', {
+          request: {
+            contents,
+            config: {
+              temperature,
+              topP,
+              maxOutputTokens,
+              tools,
+              systemInstruction,
+            },
+            model,
+          },
+          response: {
+            raw: response,
+            formatted: result,
+          },
+        });
 
         return res.status(200).json(result);
       }

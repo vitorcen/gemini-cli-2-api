@@ -22,7 +22,7 @@ import type { Config } from '../config/config.js';
 import { getCoreSystemPrompt, getCompressionPrompt } from './prompts.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
-import { reportError } from '../utils/errorReporting.js';
+import { reportError, logRequestIfDebug } from '../utils/errorReporting.js';
 import { GeminiChat } from './geminiChat.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -664,8 +664,13 @@ export class GeminiClient {
       ...generationConfig,
     };
 
+    const requestContext = {
+      requestContents: contents,
+      requestConfig,
+    };
+
     try {
-      return await this.getContentGeneratorOrFail().generateContent(
+      const response = await this.getContentGeneratorOrFail().generateContent(
         {
           model,
           config: requestConfig,
@@ -673,6 +678,11 @@ export class GeminiClient {
         },
         this.lastPromptId,
       );
+
+      // Log successful request if debug mode is enabled
+      await logRequestIfDebug(requestContext, 'rawGenerateContent-api', response);
+
+      return response;
     } catch (error: unknown) {
       if (abortSignal.aborted) {
         throw error;
@@ -681,10 +691,7 @@ export class GeminiClient {
       await reportError(
         error,
         `Error generating raw content via API with model ${model}.`,
-        {
-          requestContents: contents,
-          requestConfig,
-        },
+        requestContext,
         'rawGenerateContent-api',
       );
       throw new Error(
@@ -708,8 +715,13 @@ export class GeminiClient {
       ...generationConfig,
     };
 
+    const requestContext = {
+      requestContents: contents,
+      requestConfig,
+    };
+
     try {
-      return await this.getContentGeneratorOrFail().generateContentStream(
+      const stream = await this.getContentGeneratorOrFail().generateContentStream(
         {
           model,
           config: requestConfig,
@@ -717,6 +729,12 @@ export class GeminiClient {
         },
         this.lastPromptId,
       );
+
+      // Log successful stream request if debug mode is enabled
+      // Note: For streams, we only log the request, not the full response
+      await logRequestIfDebug(requestContext, 'rawGenerateContentStream-api', { stream: 'initiated' });
+
+      return stream;
     } catch (error: unknown) {
       if (abortSignal.aborted) {
         throw error;
@@ -725,10 +743,7 @@ export class GeminiClient {
       await reportError(
         error,
         `Error generating raw content stream via API with model ${model}.`,
-        {
-          requestContents: contents,
-          requestConfig,
-        },
+        requestContext,
         'rawGenerateContentStream-api',
       );
       throw new Error(

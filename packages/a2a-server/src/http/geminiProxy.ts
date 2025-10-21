@@ -334,7 +334,7 @@ export function registerGeminiEndpoints(app: express.Router, config: Config) {
             ? usageMetadata.totalTokenCount ?? sumTokenCounts(usageMetadata.promptTokenCount, usageMetadata.candidatesTokenCount)
             : undefined;
           logger.info(
-            `[GEMINI_PROXY][${requestId}] Tokens usage prompt=${formatTokenCount(usageMetadata?.promptTokenCount)} completion=${formatTokenCount(usageMetadata?.candidatesTokenCount)} total=${formatTokenCount(totalTokens)}`,
+            `[GEMINI_PROXY][${requestId}] model=${model} usage: prompt=${formatTokenCount(usageMetadata?.promptTokenCount)} completion=${formatTokenCount(usageMetadata?.candidatesTokenCount)} total=${formatTokenCount(totalTokens)} tokens`,
           );
 
           res.end();

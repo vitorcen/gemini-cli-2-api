@@ -16,6 +16,71 @@ interface ErrorReportData {
 }
 
 /**
+ * Generic function to write debug reports (for both errors and successful requests).
+ * @param data The data to write (can include error, context, response, etc.)
+ * @param prefix The file name prefix (e.g., 'gemini-client-error', 'gemini-client-request')
+ * @param type A string to identify the type of report (e.g., 'rawGenerateContent-api')
+ * @param reportingDir Directory to write the report to (defaults to /tmp)
+ */
+async function writeDebugReport(
+  data: Record<string, unknown>,
+  prefix: string,
+  type: string,
+  reportingDir = os.tmpdir(),
+): Promise<string | null> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const reportFileName = `${prefix}-${type}-${timestamp}.json`;
+  const reportPath = path.join(reportingDir, reportFileName);
+
+  try {
+    const stringifiedContent = JSON.stringify(data, null, 2);
+    await fs.writeFile(reportPath, stringifiedContent);
+    return reportPath;
+  } catch (error) {
+    console.error(`Failed to write debug report to ${reportPath}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Logs request details to /tmp when DEBUG_LOG_REQUESTS environment variable is set.
+ * Works for both successful and failed requests.
+ * @param context The request context (contents, config, etc.)
+ * @param type A string to identify the type of request (e.g., 'rawGenerateContent-api')
+ * @param response Optional response data (for successful requests)
+ * @param error Optional error object (for failed requests)
+ */
+export async function logRequestIfDebug(
+  context: Record<string, unknown>,
+  type: string,
+  response?: unknown,
+  error?: Error | unknown,
+): Promise<void> {
+  if (!process.env['DEBUG_LOG_REQUESTS']) {
+    return;
+  }
+
+  const data: Record<string, unknown> = { ...context };
+
+  if (error) {
+    data['error'] = error instanceof Error
+      ? { message: error.message, stack: error.stack }
+      : { message: String(error) };
+  }
+
+  if (response !== undefined) {
+    data['response'] = response;
+  }
+
+  const prefix = error ? 'gemini-client-error' : 'gemini-client-request';
+  const reportPath = await writeDebugReport(data, prefix, type);
+
+  if (reportPath && !error) {
+    console.log(`[DEBUG] Request logged to: ${reportPath}`);
+  }
+}
+
+/**
  * Generates an error report, writes it to a temporary file, and logs information to console.error.
  * @param error The error object.
  * @param context The relevant context (e.g., chat history, request contents).
