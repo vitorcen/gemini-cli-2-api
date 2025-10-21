@@ -17,7 +17,10 @@ const isMainModule =
   path.resolve(url.fileURLToPath(import.meta.url));
 
 process.on('uncaughtException', (error) => {
-  logger.error('Unhandled exception:', error);
+  // Only print the first line of the error (no stack trace)
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const firstLine = errorMessage.split('\n')[0];
+  logger.error(`Unhandled exception: ${firstLine}`);
   process.exit(1);
 });
 
@@ -27,7 +30,10 @@ if (
   process.env['NODE_ENV'] !== 'test'
 ) {
   main().catch((error) => {
-    logger.error('[CoreAgent] Unhandled error in main:', error);
+    // Only print the first line of the error (no stack trace)
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const firstLine = errorMessage.split('\n')[0];
+    logger.error(`[CoreAgent] Unhandled error in main: ${firstLine}`);
     process.exit(1);
   });
 }

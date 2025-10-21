@@ -25,7 +25,7 @@ import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { reportError, logRequestIfDebug } from '../utils/errorReporting.js';
 import { GeminiChat } from './geminiChat.js';
 import { retryWithBackoff } from '../utils/retry.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { getErrorMessage, extractErrorSummary } from '../utils/errors.js';
 import { tokenLimit } from './tokenLimits.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import type { ContentGenerator } from './contentGenerator.js';
@@ -262,6 +262,12 @@ export class GeminiClient {
         history,
       );
     } catch (error) {
+      // Extract and print error summary for user
+      const errorSummary = extractErrorSummary(error);
+      if (errorSummary) {
+        console.error(`API Error: ${errorSummary}`);
+      }
+
       await reportError(
         error,
         'Error initializing Gemini chat session.',
@@ -634,6 +640,12 @@ export class GeminiClient {
         throw error;
       }
 
+      // Extract and print error summary for user
+      const errorSummary = extractErrorSummary(error);
+      if (errorSummary) {
+        console.error(`API Error: ${errorSummary}`);
+      }
+
       await reportError(
         error,
         `Error generating content via API with model ${currentAttemptModel}.`,
@@ -688,6 +700,12 @@ export class GeminiClient {
         throw error;
       }
 
+      // Extract and print error summary for user
+      const errorSummary = extractErrorSummary(error);
+      if (errorSummary) {
+        console.error(`API Error: ${errorSummary}`);
+      }
+
       await reportError(
         error,
         `Error generating raw content via API with model ${model}.`,
@@ -738,6 +756,12 @@ export class GeminiClient {
     } catch (error: unknown) {
       if (abortSignal.aborted) {
         throw error;
+      }
+
+      // Extract and print error summary for user
+      const errorSummary = extractErrorSummary(error);
+      if (errorSummary) {
+        console.error(`API Error: ${errorSummary}`);
       }
 
       await reportError(

@@ -25,6 +25,48 @@ export function getErrorMessage(error: unknown): string {
   }
 }
 
+/**
+ * Extract error code and reason from API errors for user-friendly display
+ */
+export function extractErrorSummary(error: unknown): string | null {
+  try {
+    if (error instanceof Error) {
+      const message = error.message;
+
+      // Try to parse JSON error from message
+      const jsonMatch = message.match(/\[(\{[\s\S]*?\})\]/);
+      if (jsonMatch) {
+        try {
+          const errorData = JSON.parse(jsonMatch[1]);
+          if (errorData.error) {
+            const code = errorData.error.code;
+            const msg = errorData.error.message;
+            const reason = errorData.error.errors?.[0]?.reason;
+
+            if (code && msg) {
+              return reason
+                ? `[${code}] ${reason}: ${msg}`
+                : `[${code}] ${msg}`;
+            }
+          }
+        } catch {
+          // JSON parse failed, fall through
+        }
+      }
+
+      // Fallback: extract code if present in message
+      const codeMatch = message.match(/code[:\s]+(\d+)/i);
+      if (codeMatch) {
+        return `[${codeMatch[1]}] ${message.split('\n')[0]}`;
+      }
+    }
+  } catch {
+    // Silently fail
+  }
+
+  return null;
+}
+
 export class FatalError extends Error {
   constructor(
     message: string,

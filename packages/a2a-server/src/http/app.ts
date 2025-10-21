@@ -203,9 +203,30 @@ export async function createApp() {
       }
       res.json({ metadata: await wrapper.task.getMetadata() });
     });
+
+    // Global error handler - only print first line of error, no stack trace
+    expressApp.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const firstLine = errorMessage.split('\n')[0];
+      const errorName = err instanceof Error && err.name ? `${err.name}: ` : '';
+      logger.error(`${errorName}${firstLine}`);
+
+      if (!res.headersSent) {
+        res.status(err.status || 500).json({
+          error: {
+            type: 'internal_error',
+            message: firstLine,
+          },
+        });
+      }
+    });
+
     return expressApp;
   } catch (error) {
-    logger.error('[CoreAgent] Error during startup:', error);
+    // Only print the first line of the error (no stack trace)
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const firstLine = errorMessage.split('\n')[0];
+    logger.error(`[CoreAgent] Error during startup: ${firstLine}`);
     process.exit(1);
   }
 }
@@ -235,7 +256,10 @@ export async function main() {
       logger.info('[CoreAgent] Press Ctrl+C to stop the server');
     });
   } catch (error) {
-    logger.error('[CoreAgent] Error during startup:', error);
+    // Only print the first line of the error (no stack trace)
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const firstLine = errorMessage.split('\n')[0];
+    logger.error(`[CoreAgent] Error during startup: ${firstLine}`);
     process.exit(1);
   }
 }
