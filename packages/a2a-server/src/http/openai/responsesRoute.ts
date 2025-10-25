@@ -19,9 +19,11 @@ import { logger } from '../../utils/logger.js';
 import {
   mapOpenAIModelToGemini,
   serializeForLog,
+  safeJsonStringify,
 } from './utils.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { mergeWithDefaultTools } from './tools.js';
 import { handleStreamingResponse } from './streaming.js';
 
@@ -163,6 +165,31 @@ function normalizeInputToMessages(input: ResponsesInputItem[] | string): OpenAIM
   return messages;
 }
 
+function inferCwdFromInput(input: ResponsesInputItem[] | string | undefined): string | undefined {
+  try {
+    const texts: string[] = [];
+    if (typeof input === 'string') {
+      texts.push(input);
+    } else if (Array.isArray(input)) {
+      for (const it of input) {
+        if ((it as any)?.type === 'message') {
+          const m = it as any;
+          for (const c of m.content || []) {
+            if (typeof c?.text === 'string') texts.push(c.text);
+          }
+        } else if ((it as any)?.role && typeof (it as any).content === 'string') {
+          texts.push((it as any).content);
+        }
+      }
+    }
+    const blob = texts.join('\n');
+    const m = blob.match(/<cwd>([^<]+)<\/cwd>/);
+    const cwd = m?.[1]?.trim();
+    if (cwd && cwd.startsWith('/')) return cwd;
+  } catch {}
+  return undefined;
+}
+
 async function handleNonStreamingResponse(
   res: express.Response,
   responseId: string,
@@ -179,26 +206,61 @@ async function handleNonStreamingResponse(
         const geminiResponse = await config
             .getGeminiClient()
             .rawGenerateContent(contents, params, abortController.signal, model);
-        const text = getResponseText(geminiResponse) || 'OK';
 
-        const result = {
+        const usage = (geminiResponse as any).usageMetadata || {};
+        const parts = (geminiResponse as any)?.candidates?.[0]?.content?.parts || [];
+        const functionCalls: Array<{ call_id: string; name: string; arguments: string }>= [];
+        for (const part of parts) {
+          if (part?.functionCall) {
+            const call_id = `call_${uuidv4()}`;
+            const name = part.functionCall.name;
+            const args = part.functionCall.args ?? {};
+            functionCalls.push({ call_id, name, arguments: safeJsonStringify(args) });
+          }
+        }
+
+        if (functionCalls.length > 0) {
+          const result = {
             id: responseId,
             object: 'response',
             created: Math.floor(Date.now() / 1000),
             model,
-            output: [
-                {
-                    type: 'message',
-                    role: 'assistant',
-                    content: [{ type: 'text', text }],
-                },
-            ],
+            status: 'requires_action',
+            output: functionCalls.map((fc) => ({
+              type: 'function_call',
+              call_id: fc.call_id,
+              name: fc.name,
+              arguments: fc.arguments,
+            })),
             usage: {
-                input_tokens: (geminiResponse as any).usageMetadata?.promptTokenCount || 0,
-                output_tokens: (geminiResponse as any).usageMetadata?.candidatesTokenCount || 0,
-                total_tokens: (geminiResponse as any).usageMetadata?.totalTokenCount || 0,
+              input_tokens: usage.promptTokenCount || 0,
+              output_tokens: usage.candidatesTokenCount || 0,
+              total_tokens: usage.totalTokenCount || 0,
             },
-        };
+          } as const;
+          res.status(200).json(result);
+          return;
+        }
+
+        const text = getResponseText(geminiResponse) || 'OK';
+        const result = {
+          id: responseId,
+          object: 'response',
+          created: Math.floor(Date.now() / 1000),
+          model,
+          output: [
+            {
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'text', text }],
+            },
+          ],
+          usage: {
+            input_tokens: usage.promptTokenCount || 0,
+            output_tokens: usage.candidatesTokenCount || 0,
+            total_tokens: usage.totalTokenCount || 0,
+          },
+        } as const;
         res.status(200).json(result);
     } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to generate response';
@@ -223,10 +285,30 @@ export async function responsesRoute(
     const responseId = `resp_${uuidv4()}`;
 
     const allTools = mergeWithDefaultTools(body.tools);
+    const finalToolNames = allTools.map(t => (t as any).function?.name).filter(Boolean);
+
+    logger.info(
+      `${LOG_PREFIX}[${requestId}] Tool processing details: ${serializeForLog({
+        providedTools: body.tools?.map(t => (t as any).function?.name).filter(Boolean) ?? [],
+        finalToolNames,
+      })}`
+    );
 
     // Normalize Responses API input to Chat Completions message format
     const normalizedMessages = normalizeInputToMessages(body.input || []);
-    const { contents, systemInstruction } = convertOpenAIMessagesToGemini(normalizedMessages);
+
+    // Strip <user_instructions> tags from user messages to prevent contamination
+    // (client may inadvertently include generated AGENTS.md content as user instructions)
+    const cleanedMessages = normalizedMessages.map(msg => {
+      if (msg.role === 'user' && typeof msg.content === 'string') {
+        // Remove <user_instructions>...</user_instructions> blocks
+        const cleaned = msg.content.replace(/<user_instructions>[\s\S]*?<\/user_instructions>\s*/g, '');
+        return { ...msg, content: cleaned };
+      }
+      return msg;
+    });
+
+    const { contents, systemInstruction } = convertOpenAIMessagesToGemini(cleanedMessages);
     const tools: Tool[] = convertOpenAIToolsToGemini(allTools) as Tool[];
 
     const allowedFunctionNames = tools
@@ -241,13 +323,44 @@ export async function responsesRoute(
       },
     } : undefined;
 
-    const requestInstructions = body.instructions?.content;
-    const mergedSystemInstruction = [requestInstructions, systemInstruction]
+    // Load global Codex instructions from ~/.codex/instructions.md if present
+    const globalCodexInstructions = (() => {
+      try {
+        const p = path.join(os.homedir?.() || '', '.codex', 'instructions.md');
+        if (p && fs.existsSync(p)) {
+          return fs.readFileSync(p, 'utf8').toString();
+        }
+      } catch {}
+      return '';
+    })();
+
+    const requestInstructions = [
+      globalCodexInstructions,
+      body.instructions?.content,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    const repoRootHint = (() => {
+      const cwd = inferCwdFromInput(body.input) || process.cwd();
+      return [
+        '[System] Repository context and path rules:',
+        `- Repo root: ${cwd}`,
+        '- All file paths must be within the repo root.',
+        '- Use POSIX forward slashes in paths (no Windows backslashes).',
+        '- Do not reference home directories (e.g., ~/.codex) or external locations.',
+      ].join('\n');
+    })();
+    const mergedSystemInstruction = [repoRootHint, requestInstructions, systemInstruction]
       .filter(Boolean)
       .join('\n\n')
       .trim();
 
-    const commonParams = {
+    // Try to infer env cwd from input text (environment_context block)
+    const inferredCwd = inferCwdFromInput(body.input);
+
+    // Simple loop detection based on recent Responses input history will be computed after loopGuardEnabled is known
+
+    const commonParams: any = {
       temperature: body.temperature,
       topP: body.top_p,
       maxOutputTokens: body.max_output_tokens,
@@ -255,8 +368,12 @@ export async function responsesRoute(
       toolConfig,
       automaticFunctionCalling: { disable: false },
       systemInstruction: mergedSystemInstruction.length > 0 ? { role: 'user', parts: [{ text: mergedSystemInstruction }] } : undefined,
+      // Private channel to pass environment hints to our streaming layer.
+      _a2aEnv: { ...(inferredCwd ? { cwd: inferredCwd } : {}) },
     };
 
+    const logSysPreview = String((process.env as Record<string, string | undefined>)['A2A_LOG_SYSINSTR'] ?? '0') === '1';
+    const sysInstrPreview = logSysPreview && mergedSystemInstruction ? mergedSystemInstruction.slice(0, 240) : undefined;
     logger.info(
       `${LOG_PREFIX}[${requestId}] Upstream payload ${serializeForLog({
         endpoint: '/v1/responses',
@@ -266,6 +383,9 @@ export async function responsesRoute(
         mappedModel: model,
         messageCount: body.input?.length ?? 0,
         hasSystemInstruction: !!commonParams.systemInstruction,
+        systemInstructionLength: mergedSystemInstruction?.length ?? 0,
+        codexInstructionsLoaded: Boolean(globalCodexInstructions),
+        systemInstructionPreview: sysInstrPreview,
         geminiContents: contents,
         providedToolsCount: body.tools?.length ?? 0,
         finalToolsCount: allTools.length,
@@ -281,6 +401,8 @@ export async function responsesRoute(
     // LoopGuard flag (read before logging exec plan)
     // LoopGuard: single switch. ON by default to prevent runaway token usage.
     const loopGuardEnabled = String((process.env as Record<string, string | undefined>)['A2A_LOOP_GUARD'] ?? '1') !== '0';
+    // Now compute loopWarning
+    const loopWarning = loopGuardEnabled ? detectLoopFromResponsesInput(body.input) : undefined;
 
     try {
       const planMsg = serializeForLog({ stream, model, loopGuardEnabled, toolsCount: tools.length, allowedFunctionNames, sysInstr: !!commonParams.systemInstruction });
@@ -298,8 +420,7 @@ export async function responsesRoute(
       });
     }
 
-    // Simple loop detection based on recent Responses input history
-    const loopWarning = loopGuardEnabled ? detectLoopFromResponsesInput(body.input) : undefined;
+    // loopWarning computed above
 
     if (loopGuardEnabled) {
       try {
@@ -312,10 +433,34 @@ export async function responsesRoute(
     }
 
     if (stream && loopWarning && loopGuardEnabled) {
-      // Short-circuit to avoid runaway token costs. Also log a clear warning.
-      logger.warn(`${LOG_PREFIX}[${requestId}] LoopGuard triggered: ${loopWarning}`);
-      appendReqLog(requestId, `LoopGuard triggered: ${loopWarning}`);
-      streamImmediateWarning(res, responseId, loopWarning);
+      // Special case: task completion detected via update_plan pattern
+      if (loopWarning === '__TASK_COMPLETED__') {
+        logger.info(`${LOG_PREFIX}[${requestId}] LoopGuard detected task completion via update_plan pattern`);
+        appendReqLog(requestId, 'LoopGuard: task completion detected, sending synthetic completed response');
+        // Send synthetic SSE response indicating task completion
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        const writeEvent = (event: any) => {
+          const type = String(event?.type || 'message');
+          res.write(`event: ${type}\n`);
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        };
+        writeEvent({ type: 'response.created', response: { id: responseId } });
+        const completionText = 'Task completed successfully.';
+        writeEvent({ type: 'response.output_text.delta', delta: completionText });
+        writeEvent({ type: 'response.output_text.done', output_text: completionText });
+        const finalResp = { id: responseId, status: 'completed' };
+        writeEvent({ type: 'response.done', response: finalResp });
+        writeEvent({ type: 'response.completed', response: finalResp });
+        res.end();
+        return;
+      }
+      // Short-circuit on other loop detections to prevent runaway token usage
+      logger.warn(`${LOG_PREFIX}[${requestId}] LoopGuard short-circuit: ${loopWarning}`);
+      appendReqLog(requestId, `LoopGuard short-circuit: ${loopWarning}`);
+      res.status(400).json({ error: { message: loopWarning } });
       return;
     }
 
@@ -363,41 +508,25 @@ function appendReqLog(requestId: string, line: string) {
   try { fs.appendFileSync(p, `[${new Date().toISOString()}] ${line}\n`, 'utf8'); } catch {}
 }
 
-function streamImmediateWarning(res: express.Response, responseId: string, message: string) {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-
-  const write = (event: any) => {
-    res.write(`event: ${event.type}\n`);
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-  };
-  write({ type: 'response.created', response: { id: responseId } });
-  write({ type: 'response.output_text.delta', delta: message });
-  write({ type: 'response.output_text.done', output_text: message });
-  const resp = { id: responseId, status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'text', text: message }] }] };
-  write({ type: 'response.done', response: resp });
-  write({ type: 'response.completed', response: resp });
-  res.end();
-}
+// Removed old streamImmediateWarning helper. We no longer short-circuit streams on loop warnings.
 
 function detectLoopFromResponsesInput(input: OpenAIResponsesRequest['input']): string | undefined {
   if (!Array.isArray(input)) return undefined;
   // Scan for last few function_call and function_call_output pairs
-  type Call = { id: string; name: string; argsKey: string; output?: string };
+  type Call = { id: string; name: string; argsKey: string; args: any; output?: string };
   const calls: Call[] = [];
-  const map = new Map<string, { name: string; argsKey: string }>();
+  const map = new Map<string, { name: string; argsKey: string; args: any }>();
   for (const item of input) {
     if ((item as any).type === 'function_call') {
       const it = item as any;
+      const argsObj = typeof it.arguments === 'string' ? safeParseJson(it.arguments) : (it.arguments ?? {});
       const argsStr = typeof it.arguments === 'string' ? it.arguments : JSON.stringify(it.arguments ?? {});
-      map.set(it.call_id, { name: it.name, argsKey: `${it.name}:${argsStr}` });
+      map.set(it.call_id, { name: it.name, argsKey: `${it.name}:${argsStr}`, args: argsObj });
     } else if ((item as any).type === 'function_call_output') {
       const it = item as any;
       const meta = map.get(it.call_id);
       if (meta) {
-        calls.push({ id: it.call_id, name: meta.name, argsKey: meta.argsKey, output: typeof it.output === 'string' ? it.output : JSON.stringify(it.output) });
+        calls.push({ id: it.call_id, name: meta.name, argsKey: meta.argsKey, args: meta.args, output: typeof it.output === 'string' ? it.output : JSON.stringify(it.output) });
       }
     }
   }
@@ -413,6 +542,21 @@ function detectLoopFromResponsesInput(input: OpenAIResponsesRequest['input']): s
     const last3 = calls.slice(-3);
     if (last3.every(c => c.argsKey === last3[0].argsKey) && last3.every(c => !String(c.output).includes('Error'))) {
       return '[System] Detected a repetition loop: called the same tool repeatedly. To save tokens, avoid repeating identical successful operations.';
+    }
+  }
+  // Detect update_plan completion pattern: if last 2 calls are update_plan with all steps completed
+  if (calls.length >= 2) {
+    const last2 = calls.slice(-2);
+    const allUpdatePlan = last2.every(c => c.name === 'update_plan');
+    if (allUpdatePlan) {
+      // Check if all plans show completed status
+      const allCompleted = last2.every(c => {
+        const plan = c.args?.plan || [];
+        return Array.isArray(plan) && plan.length > 0 && plan.every((step: any) => step?.status === 'completed');
+      });
+      if (allCompleted) {
+        return '__TASK_COMPLETED__'; // Special marker for task completion
+      }
     }
   }
   return undefined;

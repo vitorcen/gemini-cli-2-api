@@ -291,34 +291,48 @@ export function mergeWithDefaultTools(
 
   const merged = new Map<string, OpenAITool>();
 
-  const addTool = (tool: OpenAITool) => {
-    if (tool.type !== 'function' || !(tool as any).function?.name) return;
-    const name = (tool as any).function.name;
-    if (!name) return;
+  // Prioritize client-provided tools
+  if (provided) {
+    for (const tool of provided) {
+      if (tool.type === 'function' && (tool as any).function?.name) {
+        const name = (tool as any).function.name;
+        if (name) {
+          merged.set(name, tool);
+        }
+      }
+    }
+  }
+
+  // Add any missing default tools from the canonical map
+  for (const [name, tool] of codexToolsMap.entries()) {
     if (!merged.has(name)) {
       merged.set(name, tool);
     }
-    // Handle shell alias
-    if (name === 'shell' && !merged.has('local_shell')) {
-      const localShellTool = codexToolsMap.get('local_shell')!;
-      merged.set('local_shell', localShellTool);
-    }
-    if (name === 'local_shell' && !merged.has('shell')) {
-      const shellTool = codexToolsMap.get('shell')!;
-      merged.set('shell', shellTool);
-    }
-  };
-
-  for (const tool of provided) {
-    addTool(tool);
   }
 
-  // Ensure all default tools are present if not provided by the client
-  for (const tool of codexTools) {
-    if (tool.type === 'function' && (tool as any).function?.name && !merged.has((tool as any).function.name)) {
-      addTool(tool);
+  // Handle shell aliases
+  if (merged.has('shell') && !merged.has('local_shell')) {
+    merged.set('local_shell', codexToolsMap.get('local_shell')!);
+  }
+  if (merged.has('local_shell') && !merged.has('shell')) {
+    merged.set('shell', codexToolsMap.get('shell')!);
+  }
+
+  const allowedToolsRaw = (process.env as Record<string, string | undefined>)['A2A_ALLOWED_TOOLS'] ?? '';
+  const allowedToolNames = new Set(allowedToolsRaw.split(',').map(t => t.trim()).filter(Boolean));
+
+  if (allowedToolNames.size === 0) {
+    // If no whitelist is provided, allow all default tools for backward compatibility.
+    const defaultToolNames = new Set(codexTools.map(t => (t as any).function.name));
+    for (const name of defaultToolNames) {
+      allowedToolNames.add(name);
     }
   }
 
-  return Array.from(merged.values());
+  const finalTools = Array.from(merged.values()).filter(t => {
+    const name = (t as any).function.name;
+    return name && allowedToolNames.has(name);
+  });
+
+  return finalTools;
 }
