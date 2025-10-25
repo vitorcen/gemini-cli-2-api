@@ -160,6 +160,36 @@ async function writeDebugLog(
   }
 }
 
+/**
+ * Merge consecutive contents from the same role to satisfy Gemini API requirements
+ */
+function mergeConsecutiveContents(contents: Content[]): Content[] {
+  if (contents.length === 0) return [];
+
+  const merged: Content[] = [{
+    role: contents[0].role,
+    parts: [...(contents[0].parts || [])]
+  }];
+
+  for (let i = 1; i < contents.length; i++) {
+    const current = contents[i];
+    const last = merged[merged.length - 1];
+
+    if (current.role === last.role) {
+      // Same role, merge parts
+      last.parts = [...(last.parts || []), ...(current.parts || [])];
+    } else {
+      // Different role, add new content
+      merged.push({
+        role: current.role,
+        parts: [...(current.parts || [])]
+      });
+    }
+  }
+
+  return merged;
+}
+
 export function registerClaudeEndpoints(app: express.Router, defaultConfig: Config) {
   // Claude-compatible /v1/messages endpoint
   app.post('/messages', async (req: express.Request, res: express.Response) => {
@@ -200,13 +230,13 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
       const maxOutputTokens = body.max_tokens || 4096;
 
       // Build Gemini-compatible contents array with tool support
-      const contents: Content[] = [];
+      const unprocessedContents: Content[] = [];
       const toolUseMap = new Map<string, string>(); // tool_use_id -> name
 
       for (const message of body.messages) {
         if (typeof message.content === 'string') {
           // Simple text message
-          contents.push({
+          unprocessedContents.push({
             role: message.role === 'assistant' ? 'model' : 'user',
             parts: [{ text: message.content }]
           });
@@ -239,12 +269,29 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
           }
 
           if (parts.length > 0) {
-            contents.push({
+            unprocessedContents.push({
               role: message.role === 'assistant' ? 'model' : 'user',
               parts
             });
           }
         }
+      }
+
+      // Different processing logic for streaming vs non-streaming requests
+      // Non-streaming requests (e.g., title generation) should not merge or modify messages
+      // Streaming requests (normal conversation) should merge consecutive same-role messages
+      let contents: Content[];
+      if (stream) {
+        // Streaming: merge consecutive contents from the same role to ensure API compliance
+        contents = mergeConsecutiveContents(unprocessedContents);
+      } else {
+        // Non-streaming: use messages as-is without merging to avoid contamination
+        contents = unprocessedContents;
+      }
+
+      // Ensure we have at least one message to send
+      if (contents.length === 0) {
+        throw new Error('No valid messages to send to the model');
       }
 
       // Handle system prompt and tools
