@@ -75,7 +75,8 @@ export function mapOpenAIModelToGemini(requestedModel: string | undefined): stri
     return DEFAULT_GEMINI_FLASH_MODEL;
   }
 
-  if (lower.startsWith('gpt-')) {
+  // Map both gpt-* and codex-* models to gemini-2.5-pro
+  if (lower.startsWith('gpt-') || lower.startsWith('codex-')) {
     return DEFAULT_GEMINI_MODEL;
   }
 

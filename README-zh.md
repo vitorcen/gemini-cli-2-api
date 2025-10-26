@@ -345,8 +345,8 @@ claude --model sonnet "Hello Claude"
 cd packages/a2a-server
 USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
 
-# 2. 使用 Gemini 模型与 Codex CLI
-OPENAI_BASE_URL="http://127.0.0.1:41242/v1" codex -m gemini-flash-latest
+# 2. 使用  Codex CLI 会转成 Gemini 模型
+OPENAI_BASE_URL="http://127.0.0.1:41242/v1" codex -m codex-experimental
 
 # 3. 恢复 Codex
 unset OPENAI_BASE_URL && codex resume

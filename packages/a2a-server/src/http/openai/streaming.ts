@@ -58,9 +58,13 @@ export async function handleStreamingResponse(
   appendReqLog(requestId, `Begin streaming ${responseId} model=${model}`);
 
   // Responses API: emit response.created first
-  // Masquerade as test-gpt-5-codex so codex client uses FULL tool config
+  // Masquerade as codex-experimental so codex client uses FULL tool config
   // (has GPT_5_CODEX_INSTRUCTIONS + experimental_supported_tools: read_file/list_dir/grep_files)
-  const masqueradeModel = 'test-gpt-5-codex';
+  // This model name is checked in codex-rs/core/src/model_family.rs:131 (codex-* branch)
+  // IMPORTANT: Codex client builds ToolRouter based on STARTUP config, not response model.
+  // So if user's config has "gpt-5", client won't have these tools even if we return "codex-experimental".
+  // User must either: 1) set model to "test-gpt-5-codex" in config, or 2) use CODEX_EXPERIMENTAL=1 env var
+  const masqueradeModel = 'codex-experimental';
   writeEvent({ type: 'response.created', response: { id: responseId, model: masqueradeModel } });
   
   // Optional fast-start: immediately emit a minimal update_plan tool call to unblock clients
