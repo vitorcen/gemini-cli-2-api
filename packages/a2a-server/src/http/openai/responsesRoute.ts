@@ -29,6 +29,29 @@ import { handleStreamingResponse } from './streaming.js';
 
 const LOG_PREFIX = '[OPENAI_PROXY]';
 
+/**
+ * Write debug log file when DEBUG_LOG_REQUESTS environment variable is set
+ */
+async function writeDebugLog(
+  requestId: string,
+  type: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  if (!process.env['DEBUG_LOG_REQUESTS']) {
+    return;
+  }
+
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `openai-proxy-${type}-${requestId}-${timestamp}.json`;
+    const filepath = path.join(os.tmpdir(), filename);
+    await fs.promises.writeFile(filepath, JSON.stringify(data, null, 2));
+    logger.debug(`${LOG_PREFIX}[${requestId}] Debug log written to: ${filepath}`);
+  } catch (error) {
+    logger.error(`${LOG_PREFIX}[${requestId}] Failed to write debug log:`, error);
+  }
+}
+
 // Responses API input item types
 type ResponsesInputMessage = {
   type: 'message';
@@ -287,18 +310,22 @@ export async function responsesRoute(
     const allTools = mergeWithDefaultTools(body.tools);
     const finalToolNames = allTools.map(t => (t as any).function?.name).filter(Boolean);
 
-    logger.info(
-      `${LOG_PREFIX}[${requestId}] Tool processing details: ${serializeForLog({
-        providedTools: body.tools?.map(t => (t as any).function?.name).filter(Boolean) ?? [],
-        finalToolNames,
-      })}`
-    );
+    if (process.env['DEBUG_LOG_REQUESTS']) {
+      logger.debug(
+        `${LOG_PREFIX}[${requestId}] Tool processing details: ${serializeForLog({
+          providedTools: body.tools?.map(t => (t as any).function?.name).filter(Boolean) ?? [],
+          finalToolNames,
+        })}`
+      );
+    }
 
     // Normalize Responses API input to Chat Completions message format
     const normalizedMessages = normalizeInputToMessages(body.input || []);
 
     // Debug: log normalized messages structure
-    logger.info(`${LOG_PREFIX}[${requestId}] Normalized messages: ${normalizedMessages.length} messages, types: ${normalizedMessages.map(m => `${m.role}:${typeof m.content}`).join(', ')}`);
+    if (process.env['DEBUG_LOG_REQUESTS']) {
+      logger.debug(`${LOG_PREFIX}[${requestId}] Normalized messages: ${normalizedMessages.length} messages, types: ${normalizedMessages.map(m => `${m.role}:${typeof m.content}`).join(', ')}`);
+    }
 
     // Strip <user_instructions> tags from user messages to prevent contamination
     // (client may inadvertently include generated AGENTS.md content as user instructions)
@@ -308,12 +335,12 @@ export async function responsesRoute(
       // Handle string content
       if (typeof msg.content === 'string') {
         const hasTag = msg.content.includes('<user_instructions>');
-        if (hasTag) {
-          logger.info(`${LOG_PREFIX}[${requestId}] Filtering <user_instructions> from message ${idx} (string), original length: ${msg.content.length}`);
+        if (hasTag && process.env['DEBUG_LOG_REQUESTS']) {
+          logger.debug(`${LOG_PREFIX}[${requestId}] Filtering <user_instructions> from message ${idx} (string), original length: ${msg.content.length}`);
         }
         const cleaned = msg.content.replace(/<user_instructions>[\s\S]*?<\/user_instructions>\s*/g, '');
-        if (hasTag) {
-          logger.info(`${LOG_PREFIX}[${requestId}] After filtering: length=${cleaned.length}, still has tag=${cleaned.includes('<user_instructions>')}`);
+        if (hasTag && process.env['DEBUG_LOG_REQUESTS']) {
+          logger.debug(`${LOG_PREFIX}[${requestId}] After filtering: length=${cleaned.length}, still has tag=${cleaned.includes('<user_instructions>')}`);
         }
         return { ...msg, content: cleaned };
       }
@@ -330,25 +357,28 @@ export async function responsesRoute(
           }
           return item;
         });
-        if (hasTag) {
-          logger.info(`${LOG_PREFIX}[${requestId}] Filtering <user_instructions> from message ${idx} (content array)`);
+        if (hasTag && process.env['DEBUG_LOG_REQUESTS']) {
+          logger.debug(`${LOG_PREFIX}[${requestId}] Filtering <user_instructions> from message ${idx} (content array)`);
           return { ...msg, content: cleanedContent };
         }
+        return { ...msg, content: cleanedContent };
       }
 
       return msg;
     });
 
     // Debug: verify cleaning worked
-    const firstUserMsg = cleanedMessages.find(m => m.role === 'user');
-    if (firstUserMsg) {
-      const contentStr = typeof firstUserMsg.content === 'string'
-        ? firstUserMsg.content
-        : JSON.stringify(firstUserMsg.content);
-      const hasTagAfterCleaning = contentStr.includes('<user_instructions>');
-      logger.info(`${LOG_PREFIX}[${requestId}] After cleaning, first user message still has <user_instructions>: ${hasTagAfterCleaning}`);
-      if (hasTagAfterCleaning && Array.isArray(firstUserMsg.content)) {
-        logger.info(`${LOG_PREFIX}[${requestId}] First user content item type: ${firstUserMsg.content[0]?.type}, has text: ${!!firstUserMsg.content[0]?.text}`);
+    if (process.env['DEBUG_LOG_REQUESTS']) {
+      const firstUserMsg = cleanedMessages.find(m => m.role === 'user');
+      if (firstUserMsg) {
+        const contentStr = typeof firstUserMsg.content === 'string'
+          ? firstUserMsg.content
+          : JSON.stringify(firstUserMsg.content);
+        const hasTagAfterCleaning = contentStr.includes('<user_instructions>');
+        logger.debug(`${LOG_PREFIX}[${requestId}] After cleaning, first user message still has <user_instructions>: ${hasTagAfterCleaning}`);
+        if (hasTagAfterCleaning && Array.isArray(firstUserMsg.content)) {
+          logger.debug(`${LOG_PREFIX}[${requestId}] First user content item type: ${firstUserMsg.content[0]?.type}, has text: ${!!firstUserMsg.content[0]?.text}`);
+        }
       }
     }
 
@@ -416,10 +446,11 @@ export async function responsesRoute(
       _a2aEnv: { ...(inferredCwd ? { cwd: inferredCwd } : {}) },
     };
 
-    const logSysPreview = String((process.env as Record<string, string | undefined>)['A2A_LOG_SYSINSTR'] ?? '0') === '1';
-    const sysInstrPreview = logSysPreview && mergedSystemInstruction ? mergedSystemInstruction.slice(0, 1000) : undefined;
-    logger.info(
-      `${LOG_PREFIX}[${requestId}] Upstream payload ${serializeForLog({
+    // Write detailed debug information if DEBUG_LOG_REQUESTS is set
+    if (process.env['DEBUG_LOG_REQUESTS']) {
+      const logSysPreview = String((process.env as Record<string, string | undefined>)['A2A_LOG_SYSINSTR'] ?? '0') === '1';
+      const sysInstrPreview = logSysPreview && mergedSystemInstruction ? mergedSystemInstruction.slice(0, 1000) : undefined;
+      await writeDebugLog(requestId, 'upstream-payload', {
         endpoint: '/v1/responses',
         stream,
         responseId,
@@ -434,13 +465,10 @@ export async function responsesRoute(
         providedToolsCount: body.tools?.length ?? 0,
         finalToolsCount: allTools.length,
         finalToolNames: allowedFunctionNames,
-      })}`
-    );
+      });
+    }
 
     appendReqLog(requestId, `Upstream payload for ${responseId}`);
-    // Immediate checkpoint after upstream payload logging
-    logger.info(`${LOG_PREFIX}[${requestId}] Checkpoint A: after Upstream payload`);
-    appendReqLog(requestId, 'Checkpoint A: after Upstream payload');
 
     // LoopGuard flag (read before logging exec plan)
     // LoopGuard: single switch. ON by default to prevent runaway token usage.
@@ -448,13 +476,16 @@ export async function responsesRoute(
     // Now compute loopWarning
     const loopWarning = loopGuardEnabled ? detectLoopFromResponsesInput(body.input) : undefined;
 
-    try {
-      const planMsg = serializeForLog({ stream, model, loopGuardEnabled, toolsCount: tools.length, allowedFunctionNames, sysInstr: !!commonParams.systemInstruction });
-      logger.info(`${LOG_PREFIX}[${requestId}] Exec plan ${planMsg}`);
-      appendReqLog(requestId, `Exec plan: ${planMsg}`);
-    } catch (e) {
-      logger.warn(`${LOG_PREFIX}[${requestId}] Failed to log Exec plan: ${(e as Error).message}`);
+    // Log exec plan in debug mode
+    if (process.env['DEBUG_LOG_REQUESTS']) {
+      try {
+        const planMsg = serializeForLog({ stream, model, loopGuardEnabled, toolsCount: tools.length, allowedFunctionNames, sysInstr: !!commonParams.systemInstruction });
+        logger.debug(`${LOG_PREFIX}[${requestId}] Exec plan ${planMsg}`);
+      } catch (e) {
+        logger.warn(`${LOG_PREFIX}[${requestId}] Failed to log Exec plan: ${(e as Error).message}`);
+      }
     }
+    appendReqLog(requestId, `Exec plan: stream=${stream} model=${model}`);
 
     // Gemini API requires at least one content item
     if (contents.length === 0) {
@@ -466,14 +497,16 @@ export async function responsesRoute(
 
     // loopWarning computed above
 
-    if (loopGuardEnabled) {
+    if (loopGuardEnabled && process.env['DEBUG_LOG_REQUESTS']) {
       try {
         const loopDbg = summarizeRecentFunctionCalls(body.input);
-        logger.info(
+        logger.debug(
           `${LOG_PREFIX}[${requestId}] LoopGuard check: enabled=${loopGuardEnabled}, warning=${Boolean(loopWarning)} ${serializeForLog(loopDbg)}`
         );
-        appendReqLog(requestId, `LoopGuard check: ${JSON.stringify({ enabled: loopGuardEnabled, warning: Boolean(loopWarning), summary: loopDbg })}`);
       } catch {}
+    }
+    if (loopGuardEnabled) {
+      appendReqLog(requestId, `LoopGuard: enabled=${loopGuardEnabled}, warning=${Boolean(loopWarning)}`);
     }
 
     if (stream && loopWarning && loopGuardEnabled) {
@@ -512,8 +545,15 @@ export async function responsesRoute(
     }
 
     if (stream) {
+      // Log request info like claudeProxy
+      const textSizeKB = (Buffer.byteLength(JSON.stringify(contents), 'utf8') / 1024).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      logger.info(
+        `${LOG_PREFIX}[${requestId}] Sending request model=${model} stream=true text=${textSizeKB}KB`,
+      );
       appendReqLog(requestId, 'Checkpoint B: before handleStreamingResponse');
-      logger.info(`${LOG_PREFIX}[${requestId}] Checkpoint B: before streaming handler`);
+      if (process.env['DEBUG_LOG_REQUESTS']) {
+        logger.debug(`${LOG_PREFIX}[${requestId}] Checkpoint B: before streaming handler`);
+      }
       try {
         await handleStreamingResponse(
           res,
@@ -525,7 +565,9 @@ export async function responsesRoute(
           commonParams,
         );
         appendReqLog(requestId, 'Checkpoint C: after handleStreamingResponse (completed)');
-        logger.info(`${LOG_PREFIX}[${requestId}] Checkpoint C: streaming handler returned`);
+        if (process.env['DEBUG_LOG_REQUESTS']) {
+          logger.debug(`${LOG_PREFIX}[${requestId}] Checkpoint C: streaming handler returned`);
+        }
       } catch (e) {
         const msg = (e as Error)?.message || String(e);
         appendReqLog(requestId, `Streaming handler threw: ${msg}`);

@@ -13,6 +13,8 @@ import * as path from 'node:path';
 import {
   safeJsonStringify,
   shouldFallbackToFlash,
+  formatTokenCount,
+  sumTokenCounts,
 } from './utils.js';
 
 const LOG_PREFIX = '[OPENAI_PROXY]';
@@ -36,7 +38,9 @@ export async function handleStreamingResponse(
     res.write(`event: ${type}\n`);
     res.write(`data: ${JSON.stringify(event)}\n\n`);
     try {
-      logger.info(`${LOG_PREFIX}[${requestId}] SSE ${type}`);
+      if (process.env['DEBUG_LOG_REQUESTS']) {
+        logger.debug(`${LOG_PREFIX}[${requestId}] SSE ${type}`);
+      }
       appendReqLog(requestId, `SSE ${type}`);
     } catch {}
   };
@@ -54,7 +58,9 @@ export async function handleStreamingResponse(
       }, pingMs)
     : null;
 
-  logger.info(`${LOG_PREFIX}[${requestId}] Begin streaming for responseId=${responseId}, model=${model}`);
+  if (process.env['DEBUG_LOG_REQUESTS']) {
+    logger.debug(`${LOG_PREFIX}[${requestId}] Begin streaming for responseId=${responseId}, model=${model}`);
+  }
   appendReqLog(requestId, `Begin streaming ${responseId} model=${model}`);
 
   // Responses API: emit response.created first
@@ -83,7 +89,11 @@ export async function handleStreamingResponse(
       writeEvent({ type: 'response.function_call_arguments.delta', call_id: callId, delta: argsText });
       writeEvent({ type: 'response.function_call_arguments.done', call_id: callId });
       writeEvent({ type: 'response.output_item.done', item: { type: 'function_call', id: callId, call_id: callId, name: 'update_plan', arguments: argsText, status: 'requires_action' } });
-      const resp: any = { id: responseId, status: 'requires_action' };
+      const resp: any = {
+        id: responseId,
+        status: 'requires_action',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
+      };
       writeEvent({ type: 'response.done', response: resp });
       writeEvent({ type: 'response.completed', response: resp });
       appendReqLog(requestId, 'Fast-start: emitted update_plan requires_action');
@@ -130,7 +140,9 @@ export async function handleStreamingResponse(
           abortController.signal,
           currentModel,
         );
-        logger.info(`${LOG_PREFIX}[${requestId}] Upstream stream acquired (model=${currentModel}).`);
+        if (process.env['DEBUG_LOG_REQUESTS']) {
+          logger.debug(`${LOG_PREFIX}[${requestId}] Upstream stream acquired (model=${currentModel}).`);
+        }
         appendReqLog(requestId, `Upstream stream acquired model=${currentModel}`);
         break;
       } catch (err) {
@@ -189,7 +201,16 @@ export async function handleStreamingResponse(
             writeEvent({ type: 'response.output_text.delta', delta: text });
             writeEvent({ type: 'response.output_text.done', output_text: text });
           }
-          const resp: any = hasTools ? { id: responseId, status: 'requires_action' } : { id: responseId, status: 'completed' };
+          // Extract usage from degraded non-streaming response
+          const degradedUsage = (oneShot as any)?.usageMetadata;
+          const usage = {
+            input_tokens: degradedUsage?.promptTokenCount || 0,
+            output_tokens: degradedUsage?.candidatesTokenCount || 0,
+            total_tokens: degradedUsage?.totalTokenCount || ((degradedUsage?.promptTokenCount || 0) + (degradedUsage?.candidatesTokenCount || 0)),
+          };
+          const resp: any = hasTools
+            ? { id: responseId, status: 'requires_action', usage }
+            : { id: responseId, status: 'completed', usage };
           writeEvent({ type: 'response.done', response: resp });
           writeEvent({ type: 'response.completed', response: resp });
           appendReqLog(requestId, `Degraded mode success: ${hasTools ? 'tool_calls' : 'text'}`);
@@ -219,7 +240,9 @@ export async function handleStreamingResponse(
           usageMeta.candidatesTokenCount += chunkUsage.candidatesTokenCount || 0;
           usageMeta.totalTokenCount += chunkUsage.totalTokenCount || 0;
         }
-        logger.info(`${LOG_PREFIX}[${requestId}] Stream chunk #${chunkCount}: parts=${parts.length}, hasUsage=${Boolean((chunk as any).usageMetadata)}`);
+        if (process.env['DEBUG_LOG_REQUESTS']) {
+          logger.debug(`${LOG_PREFIX}[${requestId}] Stream chunk #${chunkCount}: parts=${parts.length}, hasUsage=${Boolean((chunk as any).usageMetadata)}`);
+        }
         appendReqLog(requestId, `Chunk #${chunkCount} parts=${parts.length}`);
         for (const part of parts) {
           if (part?.functionCall) {
@@ -235,7 +258,9 @@ export async function handleStreamingResponse(
                   (args as any).command = ['bash', '-lc', payload];
                   appendReqLog(requestId, 'Wrapped shell string with bash -lc (heredoc/multiline)');
                 } else {
-                  logger.info(`${LOG_PREFIX}[${requestId}] Splitting local_shell command string.`);
+                  if (process.env['DEBUG_LOG_REQUESTS']) {
+                    logger.debug(`${LOG_PREFIX}[${requestId}] Splitting local_shell command string.`);
+                  }
                   appendReqLog(requestId, 'Splitting shell command string');
                   (args as any).command = stringArgv(cmd);
                 }
@@ -246,7 +271,9 @@ export async function handleStreamingResponse(
                   (args as any).command = ['bash', '-lc', payload];
                   appendReqLog(requestId, 'Wrapped single-element argv with bash -lc (heredoc/multiline)');
                 } else if (/\s/.test(raw)) {
-                  logger.info(`${LOG_PREFIX}[${requestId}] Expanding single-element shell argv into tokens.`);
+                  if (process.env['DEBUG_LOG_REQUESTS']) {
+                    logger.debug(`${LOG_PREFIX}[${requestId}] Expanding single-element shell argv into tokens.`);
+                  }
                   appendReqLog(requestId, 'Expanding single-element shell argv');
                   (args as any).command = stringArgv(raw);
                 }
@@ -291,7 +318,9 @@ export async function handleStreamingResponse(
             if (name === 'apply_patch') {
               const normalized = normalizeApplyPatchArgs(args);
               if (normalized !== args) {
-                logger.info(`${LOG_PREFIX}[${requestId}] apply_patch args normalized (delimiter '+***' cleanup applied).`);
+                if (process.env['DEBUG_LOG_REQUESTS']) {
+                  logger.debug(`${LOG_PREFIX}[${requestId}] apply_patch args normalized (delimiter '+***' cleanup applied).`);
+                }
                 appendReqLog(requestId, 'apply_patch args normalized');
               }
               (part.functionCall as any).args = normalized;
@@ -300,7 +329,9 @@ export async function handleStreamingResponse(
                 if (patchText.includes('*** Begin Patch') && patchText.includes('*** End Patch')) {
                   const applied = tryApplyPatchToFs(patchText);
                   if (applied?.written?.length) {
-                    logger.info(`${LOG_PREFIX}[${requestId}] apply_patch auto-applied: ${applied.written.join(', ')}`);
+                    if (process.env['DEBUG_LOG_REQUESTS']) {
+                      logger.debug(`${LOG_PREFIX}[${requestId}] apply_patch auto-applied: ${applied.written.join(', ')}`);
+                    }
                     appendReqLog(requestId, `apply_patch auto-applied: ${applied.written.join(', ')}`);
                     autoAppliedFiles.push(...applied.written);
                   }
@@ -374,21 +405,26 @@ export async function handleStreamingResponse(
 
     const finalUsage = mapUsage(usageMeta);
 
-    const usageString = `Tokens usage: ${finalUsage.input_tokens} (in) / ${finalUsage.output_tokens} (out) / ${finalUsage.total_tokens} (total).`;
-    logger.info(`${LOG_PREFIX}[${requestId}] ${usageString}`);
-    appendReqLog(requestId, usageString);
+    // Log usage in claudeProxy style
+    const totalTokens = sumTokenCounts(finalUsage.input_tokens, finalUsage.output_tokens);
+    logger.info(
+      `${LOG_PREFIX}[${requestId}] model=${model} usage: prompt=${formatTokenCount(finalUsage.input_tokens)} completion=${formatTokenCount(finalUsage.output_tokens)} total=${formatTokenCount(totalTokens)} tokens`,
+    );
+    appendReqLog(requestId, `usage: prompt=${finalUsage.input_tokens} completion=${finalUsage.output_tokens} total=${totalTokens} tokens`);
 
     if (aggregatedText) {
       writeEvent({ type: 'response.output_text.done', output_text: aggregatedText });
     }
     // Fix: Set status based on whether tool calls were emitted
     const finalResp: any = toolCallCount > 0
-      ? { id: responseId, status: 'requires_action' }
-      : { id: responseId, status: 'completed' };
+      ? { id: responseId, status: 'requires_action', usage: finalUsage }
+      : { id: responseId, status: 'completed', usage: finalUsage };
     writeEvent({ type: 'response.done', response: finalResp });
     // CRITICAL: Always send response.completed - it signals stream end to client
     writeEvent({ type: 'response.completed', response: finalResp });
-    logger.info(`${LOG_PREFIX}[${requestId}] Stream finished (${toolCallCount > 0 ? 'requires_action' : 'completed'}). toolCalls=${toolCallCount}, textChars=${aggregatedText.length}`);
+    if (process.env['DEBUG_LOG_REQUESTS']) {
+      logger.debug(`${LOG_PREFIX}[${requestId}] Stream finished (${toolCallCount > 0 ? 'requires_action' : 'completed'}). toolCalls=${toolCallCount}, textChars=${aggregatedText.length}`);
+    }
 
   } catch (err) {
     if ((err as Error)?.name !== 'AbortError') {
@@ -404,7 +440,9 @@ export async function handleStreamingResponse(
     if (!res.writableEnded) {
       res.end();
     }
-    logger.info(`${LOG_PREFIX}[${requestId}] SSE connection closed for responseId=${responseId}`);
+    if (process.env['DEBUG_LOG_REQUESTS']) {
+      logger.debug(`${LOG_PREFIX}[${requestId}] SSE connection closed for responseId=${responseId}`);
+    }
     appendReqLog(requestId, `SSE closed ${responseId}`);
   }
 }
