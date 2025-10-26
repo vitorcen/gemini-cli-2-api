@@ -297,16 +297,60 @@ export async function responsesRoute(
     // Normalize Responses API input to Chat Completions message format
     const normalizedMessages = normalizeInputToMessages(body.input || []);
 
+    // Debug: log normalized messages structure
+    logger.info(`${LOG_PREFIX}[${requestId}] Normalized messages: ${normalizedMessages.length} messages, types: ${normalizedMessages.map(m => `${m.role}:${typeof m.content}`).join(', ')}`);
+
     // Strip <user_instructions> tags from user messages to prevent contamination
     // (client may inadvertently include generated AGENTS.md content as user instructions)
-    const cleanedMessages = normalizedMessages.map(msg => {
-      if (msg.role === 'user' && typeof msg.content === 'string') {
-        // Remove <user_instructions>...</user_instructions> blocks
+    const cleanedMessages = normalizedMessages.map((msg, idx) => {
+      if (msg.role !== 'user') return msg;
+
+      // Handle string content
+      if (typeof msg.content === 'string') {
+        const hasTag = msg.content.includes('<user_instructions>');
+        if (hasTag) {
+          logger.info(`${LOG_PREFIX}[${requestId}] Filtering <user_instructions> from message ${idx} (string), original length: ${msg.content.length}`);
+        }
         const cleaned = msg.content.replace(/<user_instructions>[\s\S]*?<\/user_instructions>\s*/g, '');
+        if (hasTag) {
+          logger.info(`${LOG_PREFIX}[${requestId}] After filtering: length=${cleaned.length}, still has tag=${cleaned.includes('<user_instructions>')}`);
+        }
         return { ...msg, content: cleaned };
       }
+
+      // Handle OpenAI content array format: [{type: 'text', text: '...'}, ...] or [{type: 'input_text', text: '...'}, ...]
+      if (Array.isArray(msg.content)) {
+        let hasTag = false;
+        const cleanedContent = msg.content.map((item: any) => {
+          // Support both 'text' (OpenAI) and 'input_text' (Anthropic) content types
+          if ((item.type === 'text' || item.type === 'input_text') && typeof item.text === 'string' && item.text.includes('<user_instructions>')) {
+            hasTag = true;
+            const cleaned = item.text.replace(/<user_instructions>[\s\S]*?<\/user_instructions>\s*/g, '');
+            return { ...item, text: cleaned };
+          }
+          return item;
+        });
+        if (hasTag) {
+          logger.info(`${LOG_PREFIX}[${requestId}] Filtering <user_instructions> from message ${idx} (content array)`);
+          return { ...msg, content: cleanedContent };
+        }
+      }
+
       return msg;
     });
+
+    // Debug: verify cleaning worked
+    const firstUserMsg = cleanedMessages.find(m => m.role === 'user');
+    if (firstUserMsg) {
+      const contentStr = typeof firstUserMsg.content === 'string'
+        ? firstUserMsg.content
+        : JSON.stringify(firstUserMsg.content);
+      const hasTagAfterCleaning = contentStr.includes('<user_instructions>');
+      logger.info(`${LOG_PREFIX}[${requestId}] After cleaning, first user message still has <user_instructions>: ${hasTagAfterCleaning}`);
+      if (hasTagAfterCleaning && Array.isArray(firstUserMsg.content)) {
+        logger.info(`${LOG_PREFIX}[${requestId}] First user content item type: ${firstUserMsg.content[0]?.type}, has text: ${!!firstUserMsg.content[0]?.text}`);
+      }
+    }
 
     const { contents, systemInstruction } = convertOpenAIMessagesToGemini(cleanedMessages);
     const tools: Tool[] = convertOpenAIToolsToGemini(allTools) as Tool[];
@@ -318,8 +362,8 @@ export async function responsesRoute(
 
     const toolConfig: ToolConfig | undefined = tools.length > 0 ? {
       functionCallingConfig: {
-        mode: FunctionCallingConfigMode.ANY,
-        allowedFunctionNames,
+        mode: FunctionCallingConfigMode.AUTO,  // AUTO: model decides when to call tools vs output text
+        // Note: allowedFunctionNames is only valid for ANY mode, not AUTO
       },
     } : undefined;
 
@@ -350,7 +394,7 @@ export async function responsesRoute(
         '- Do not reference home directories (e.g., ~/.codex) or external locations.',
       ].join('\n');
     })();
-    const mergedSystemInstruction = [repoRootHint, requestInstructions, systemInstruction]
+    const mergedSystemInstruction = [globalCodexInstructions, repoRootHint, requestInstructions, systemInstruction]
       .filter(Boolean)
       .join('\n\n')
       .trim();
@@ -373,7 +417,7 @@ export async function responsesRoute(
     };
 
     const logSysPreview = String((process.env as Record<string, string | undefined>)['A2A_LOG_SYSINSTR'] ?? '0') === '1';
-    const sysInstrPreview = logSysPreview && mergedSystemInstruction ? mergedSystemInstruction.slice(0, 240) : undefined;
+    const sysInstrPreview = logSysPreview && mergedSystemInstruction ? mergedSystemInstruction.slice(0, 1000) : undefined;
     logger.info(
       `${LOG_PREFIX}[${requestId}] Upstream payload ${serializeForLog({
         endpoint: '/v1/responses',
@@ -433,30 +477,33 @@ export async function responsesRoute(
     }
 
     if (stream && loopWarning && loopGuardEnabled) {
-      // Special case: task completion detected via update_plan pattern
-      if (loopWarning === '__TASK_COMPLETED__') {
-        logger.info(`${LOG_PREFIX}[${requestId}] LoopGuard detected task completion via update_plan pattern`);
-        appendReqLog(requestId, 'LoopGuard: task completion detected, sending synthetic completed response');
-        // Send synthetic SSE response indicating task completion
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-        const writeEvent = (event: any) => {
-          const type = String(event?.type || 'message');
-          res.write(`event: ${type}\n`);
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
-        };
-        writeEvent({ type: 'response.created', response: { id: responseId } });
-        const completionText = 'Task completed successfully.';
-        writeEvent({ type: 'response.output_text.delta', delta: completionText });
-        writeEvent({ type: 'response.output_text.done', output_text: completionText });
-        const finalResp = { id: responseId, status: 'completed' };
-        writeEvent({ type: 'response.done', response: finalResp });
-        writeEvent({ type: 'response.completed', response: finalResp });
-        res.end();
-        return;
-      }
+      // DISABLED: task completion detection (see detectLoopFromResponsesInput comment)
+      // The __TASK_COMPLETED__ marker is no longer returned, so this code is unreachable.
+      // Keeping for reference in case we re-enable with better heuristics.
+
+      // if (loopWarning === '__TASK_COMPLETED__') {
+      //   logger.info(`${LOG_PREFIX}[${requestId}] LoopGuard detected task completion via update_plan pattern`);
+      //   appendReqLog(requestId, 'LoopGuard: task completion detected, sending synthetic completed response');
+      //   res.setHeader('Content-Type', 'text/event-stream');
+      //   res.setHeader('Cache-Control', 'no-cache, no-transform');
+      //   res.setHeader('Connection', 'keep-alive');
+      //   res.setHeader('X-Accel-Buffering', 'no');
+      //   const writeEvent = (event: any) => {
+      //     const type = String(event?.type || 'message');
+      //     res.write(`event: ${type}\n`);
+      //     res.write(`data: ${JSON.stringify(event)}\n\n`);
+      //   };
+      //   writeEvent({ type: 'response.created', response: { id: responseId } });
+      //   const completionText = 'Task completed successfully.';
+      //   writeEvent({ type: 'response.output_text.delta', delta: completionText });
+      //   writeEvent({ type: 'response.output_text.done', output_text: completionText });
+      //   const finalResp = { id: responseId, status: 'completed' };
+      //   writeEvent({ type: 'response.done', response: finalResp });
+      //   writeEvent({ type: 'response.completed', response: finalResp });
+      //   res.end();
+      //   return;
+      // }
+
       // Short-circuit on other loop detections to prevent runaway token usage
       logger.warn(`${LOG_PREFIX}[${requestId}] LoopGuard short-circuit: ${loopWarning}`);
       appendReqLog(requestId, `LoopGuard short-circuit: ${loopWarning}`);
@@ -544,21 +591,25 @@ function detectLoopFromResponsesInput(input: OpenAIResponsesRequest['input']): s
       return '[System] Detected a repetition loop: called the same tool repeatedly. To save tokens, avoid repeating identical successful operations.';
     }
   }
-  // Detect update_plan completion pattern: if last 2 calls are update_plan with all steps completed
-  if (calls.length >= 2) {
-    const last2 = calls.slice(-2);
-    const allUpdatePlan = last2.every(c => c.name === 'update_plan');
-    if (allUpdatePlan) {
-      // Check if all plans show completed status
-      const allCompleted = last2.every(c => {
-        const plan = c.args?.plan || [];
-        return Array.isArray(plan) && plan.length > 0 && plan.every((step: any) => step?.status === 'completed');
-      });
-      if (allCompleted) {
-        return '__TASK_COMPLETED__'; // Special marker for task completion
-      }
-    }
-  }
+  // DISABLED: update_plan completion detection causes false positives
+  // When clients send full history with old completed tasks, we incorrectly
+  // detect completion even when user asks new questions.
+  // TODO: Move this logic to streaming response handler to detect completion
+  // based on CURRENT response, not historical messages.
+
+  // if (calls.length >= 2) {
+  //   const last2 = calls.slice(-2);
+  //   const allUpdatePlan = last2.every(c => c.name === 'update_plan');
+  //   if (allUpdatePlan) {
+  //     const allCompleted = last2.every(c => {
+  //       const plan = c.args?.plan || [];
+  //       return Array.isArray(plan) && plan.length > 0 && plan.every((step: any) => step?.status === 'completed');
+  //     });
+  //     if (allCompleted) {
+  //       return '__TASK_COMPLETED__';
+  //     }
+  //   }
+  // }
   return undefined;
 }
 

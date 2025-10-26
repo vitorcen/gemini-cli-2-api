@@ -1,6 +1,6 @@
 {
   "name": "@google/gemini-cli-a2a-server",
-  "version": "0.8.0-preview.1-7",
+  "version": "0.8.0-preview.1-9",
   "private": true,
   "type": "module",
   "main": "dist/server.js",
@@ -19,6 +19,7 @@
     "@google/genai": "1.16.0",
     "express": "^5.1.0",
     "fs-extra": "^11.3.0",
+    "string-argv": "^0.3.2",
     "strip-json-comments": "^3.1.1",
     "tar": "^7.4.3",
     "uuid": "^11.1.0",

@@ -1,6 +1,6 @@
 {
   "name": "@vitorcen/gemini-cli-2-api",
-  "version": "0.8.0-preview.1-7",
+  "version": "0.8.0-preview.1-9",
   "engines": {
     "node": ">=20.0.0"
   },

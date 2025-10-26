@@ -427,6 +427,13 @@ function normalizeApplyPatchArgs(args: any) {
   const val = String(cloned[key] ?? '');
   let text = val;
 
+  // First: strip any garbage text before "*** Begin Patch"
+  // Models sometimes prefix with descriptions like "Создаем файл...\n*** Begin Patch"
+  const beginPatchIdx = text.indexOf('*** Begin Patch');
+  if (beginPatchIdx > 0) {
+    text = text.slice(beginPatchIdx);
+  }
+
   // Support Git-style header anywhere in the text: "new file, mode 100644, path: <file>"
   // Convert to our apply_patch envelope automatically and discard any preceding lines/markers.
   try {
