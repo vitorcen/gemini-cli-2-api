@@ -22,6 +22,10 @@ import {
 } from './utils.js';
 import { mergeWithDefaultTools } from './tools.js';
 import { handleStreamingResponse } from './streaming.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { safeJsonStringify } from './utils.js';
 
 const LOG_PREFIX = '[OPENAI_PROXY]';
 
@@ -51,29 +55,71 @@ async function handleNonStreamingChatResponse(
         const geminiResponse = await config
             .getGeminiClient()
             .rawGenerateContent(contents, params, abortController.signal, model);
-        const text = getResponseText(geminiResponse) || '';
-        const usage = geminiResponse.usageMetadata;
 
-        res.status(200).json({
+        const usage = geminiResponse.usageMetadata;
+        const parts = (geminiResponse as any)?.candidates?.[0]?.content?.parts || [];
+        const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+        for (const part of parts) {
+          if (part?.functionCall) {
+            toolCalls.push({
+              id: `call_${uuidv4()}`,
+              name: part.functionCall.name,
+              arguments: safeJsonStringify(part.functionCall.args ?? {}),
+            });
+          }
+        }
+
+        if (toolCalls.length > 0) {
+          res.status(200).json({
             id,
             object: 'chat.completion',
             created: Math.floor(Date.now() / 1000),
             model,
             choices: [
-                {
-                    index: 0,
-                    message: {
-                        role: 'assistant',
-                        content: text,
-                    },
-                    finish_reason: 'stop',
+              {
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: null,
+                  tool_calls: toolCalls.map(tc => ({
+                    id: tc.id,
+                    type: 'function',
+                    function: { name: tc.name, arguments: tc.arguments },
+                  })),
                 },
+                finish_reason: 'tool_calls',
+              },
             ],
             usage: {
-                prompt_tokens: usage?.promptTokenCount || 0,
-                completion_tokens: usage?.candidatesTokenCount || 0,
-                total_tokens: usage?.totalTokenCount || 0,
+              prompt_tokens: usage?.promptTokenCount || 0,
+              completion_tokens: usage?.candidatesTokenCount || 0,
+              total_tokens: usage?.totalTokenCount || 0,
             },
+          });
+          return;
+        }
+
+        const text = getResponseText(geminiResponse) || '';
+        res.status(200).json({
+          id,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: text,
+              },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: usage?.promptTokenCount || 0,
+            completion_tokens: usage?.candidatesTokenCount || 0,
+            total_tokens: usage?.totalTokenCount || 0,
+          },
         });
     } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to generate response';
@@ -114,13 +160,38 @@ export async function handleChatCompletions(
       },
     } : undefined;
 
+  const repoRootHint = (() => {
+    try {
+      // ChatCompletions doesn't carry our Responses input format; best effort from process.cwd().
+      const cwd = process.cwd();
+      return [
+        '[System] Repository context and path rules:',
+        `- Repo root: ${cwd}`,
+        '- All file paths must be within the repo root.',
+        '- Use POSIX forward slashes in paths (no Windows backslashes).',
+        '- Do not reference home directories (e.g., ~/.codex) or external locations.',
+      ].join('\n');
+    } catch { return ''; }
+  })();
+
+  const globalCodexInstructions = (() => {
+    try {
+      const p = path.join(os.homedir?.() || '', '.codex', 'instructions.md');
+      if (p && fs.existsSync(p)) {
+        return fs.readFileSync(p, 'utf8').toString();
+      }
+    } catch {}
+    return '';
+  })();
+
+  const finalSystemText = [globalCodexInstructions, repoRootHint, systemInstruction].filter(Boolean).join('\n\n');
   const params = {
       temperature: body.temperature,
       topP: body.top_p,
       maxOutputTokens: body.max_tokens,
       tools: tools.length > 0 ? tools : undefined,
       toolConfig,
-      systemInstruction: systemInstruction ? { role: 'user', parts: [{ text: systemInstruction }] } : undefined,
+      systemInstruction: { role: 'user', parts: [{ text: finalSystemText }] },
   };
 
   logger.info(
@@ -131,6 +202,10 @@ export async function handleChatCompletions(
       mappedModel: model,
       finalToolsCount: allTools.length,
       finalToolNames: allowedFunctionNames,
+      hasSystemInstruction: Boolean(finalSystemText),
+      systemInstructionLength: finalSystemText.length,
+      codexInstructionsLoaded: Boolean(globalCodexInstructions),
+      systemInstructionPreview: String((process.env as Record<string, string | undefined>)['A2A_LOG_SYSINSTR'] ?? '0') === '1' ? finalSystemText.slice(0, 240) : undefined,
     })}`
   );
 

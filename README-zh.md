@@ -327,19 +327,29 @@ packages/a2a-server/src/http/
 cd packages/a2a-server
 USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
 
-# 2. 配置 Claude CLI 使用中转服务
-export ANTHROPIC_BASE_URL=http://127.0.0.1:41242
+# 2. 使用 Gemini 模型与 Claude CLI
+ANTHROPIC_BASE_URL=http://127.0.0.1:41242 claude --model gemini-2.5-pro
+ANTHROPIC_BASE_URL=http://127.0.0.1:41242 claude --model gemini-flash-latest /path/to/code "Review this code"
 
-# 3. 使用 Gemini 模型
-claude --model gemini-2.5-pro "Explain quantum computing"
-claude --model gemini-flash-latest /path/to/code "Review this code"
+# 3. 工具调用示例
+ANTHROPIC_BASE_URL=http://127.0.0.1:41242 claude --model gemini-2.5-pro "What's the weather in Tokyo?"
 
-# 4. 工具调用示例
-claude --model gemini-2.5-pro "What's the weather in Tokyo?"
-
-# 5. 恢复 Claude
-unset ANTHROPIC_BASE_URL
+# 4. 恢复 Claude
 claude --model sonnet "Hello Claude"
+```
+
+## 示例：Codex CLI 工作流（实验性）
+
+```bash
+# 1. 启动中转服务
+cd packages/a2a-server
+USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
+
+# 2. 使用 Gemini 模型与 Codex CLI
+OPENAI_BASE_URL="http://127.0.0.1:41242/v1" codex -m gemini-flash-latest
+
+# 3. 恢复 Codex
+unset OPENAI_BASE_URL && codex resume
 ```
 
 ## 示例：OpenAI SDK

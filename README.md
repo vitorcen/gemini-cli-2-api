@@ -358,7 +358,7 @@ cd packages/a2a-server
 USE_CCPA=1 CODER_AGENT_PORT=41242 npm start
 
 # 2. Use Gemini models with Codex CLI
-CODEX_EXPERIMENTAL=1 OPENAI_BASE_URL="http://127.0.0.1:41242/v1" codex -m gemini-flash-latest
+OPENAI_BASE_URL="http://127.0.0.1:41242/v1" codex -m gemini-flash-latest
 
 # 3. Restore Codex
 unset OPENAI_BASE_URL && codex resume
