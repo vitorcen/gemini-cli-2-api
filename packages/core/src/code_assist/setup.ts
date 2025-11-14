@@ -52,6 +52,7 @@ export async function setupUser(client: OAuth2Client): Promise<UserData> {
   if (loadRes.currentTier) {
     if (!loadRes.cloudaicompanionProject) {
       if (projectId) {
+        console.log(`[Setup] Using GOOGLE_CLOUD_PROJECT env var: ${projectId}`);
         return {
           projectId,
           userTier: loadRes.currentTier.id,
@@ -59,6 +60,7 @@ export async function setupUser(client: OAuth2Client): Promise<UserData> {
       }
       throw new ProjectIdRequiredError();
     }
+    console.log(`[Setup] Discovered project ID from loadCodeAssist: ${loadRes.cloudaicompanionProject}`);
     return {
       projectId: loadRes.cloudaicompanionProject,
       userTier: loadRes.currentTier.id,
@@ -95,6 +97,7 @@ export async function setupUser(client: OAuth2Client): Promise<UserData> {
 
   if (!lroRes.response?.cloudaicompanionProject?.id) {
     if (projectId) {
+      console.log(`[Setup] Using GOOGLE_CLOUD_PROJECT env var after onboarding: ${projectId}`);
       return {
         projectId,
         userTier: tier.id,
@@ -103,8 +106,10 @@ export async function setupUser(client: OAuth2Client): Promise<UserData> {
     throw new ProjectIdRequiredError();
   }
 
+  const discoveredProjectId = lroRes.response.cloudaicompanionProject.id;
+  console.log(`[Setup] Discovered project ID from onboardUser: ${discoveredProjectId}`);
   return {
-    projectId: lroRes.response.cloudaicompanionProject.id,
+    projectId: discoveredProjectId,
     userTier: tier.id,
   };
 }
