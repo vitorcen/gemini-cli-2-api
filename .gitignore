@@ -20,6 +20,8 @@ bower_components
 package-lock.json
 
 # Editors
+.vscode
+.claude
 .idea
 *.iml
 

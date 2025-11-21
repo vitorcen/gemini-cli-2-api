@@ -14,6 +14,57 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+const SYNTHETIC_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
+
+const MAX_RETRIES = 5;
+const BASE_RETRY_DELAY_MS = 1000;
+
+async function executeWithRetry<T>(
+  operation: () => Promise<T>,
+  requestId: string,
+  model: string,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await operation();
+    } catch (e: any) { // eslint-disable-line @typescript-eslint/no-explicit-any
+      lastError = e;
+      const message = e?.message || '';
+      const isQuotaError =
+        message.includes('exhausted your capacity') ||
+        message.includes('quota') ||
+        message.includes('429') ||
+        (message.includes('400') && message.includes('capacity'));
+
+      if (!isQuotaError) {
+        throw e;
+      }
+
+      if (attempt === MAX_RETRIES) {
+        logger.error(
+          `[CLAUDE_PROXY][${requestId}] Max retries (${MAX_RETRIES}) exceeded for quota error.`,
+        );
+        throw e;
+      }
+
+      let waitMs = BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+      const match = message.match(/reset after (\d+)s/);
+      if (match?.[1]) {
+        waitMs = (parseInt(match[1], 10) + 1) * 1000; // buffer extra second
+      }
+
+      logger.warn(
+        `[CLAUDE_PROXY][${requestId}] Quota exhausted for ${model}. Waiting ${waitMs}ms before retry ${attempt}/${MAX_RETRIES}...`,
+      );
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
+  }
+
+  throw lastError;
+}
+
 const formatTokenCount = (value?: number): string =>
   typeof value === 'number' ? value.toLocaleString('en-US') : '0';
 
@@ -35,6 +86,7 @@ interface ClaudeContentBlock {
   input?: Record<string, any>;
   tool_use_id?: string;
   content?: string;
+  thoughtSignature?: string;
 }
 
 interface ClaudeMessage {
@@ -128,13 +180,8 @@ function mapModelName(requestedModel: string | undefined): string {
  */
 
 function filterThoughtParts(parts: any[]): any[] {
-  return parts
-    .filter(p => !p.thought)  // Filter parts with thought: true
-    .map(p => {
-      // Remove thoughtSignature field from each part
-      const { thoughtSignature, ...rest } = p;
-      return rest;
-    });
+  // Preserve thoughtSignature and other fields; only drop explicit thought blocks to reduce size.
+  return parts.filter(p => !p.thought);
 }
 
 /**
@@ -247,15 +294,22 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
           for (const block of message.content) {
             if (block.type === 'text' && block.text) {
               parts.push({ text: block.text });
-            } else if (block.type === 'tool_use' && block.id && block.name) {
+            } else if (block.type === 'tool_use' && block.name) {
               // Assistant tool call -> Gemini functionCall
-              toolUseMap.set(block.id, block.name);
-              parts.push({
+              const toolId = block.id || `toolu_${uuidv4()}`;
+              toolUseMap.set(toolId, block.name);
+              const thoughtSignature = block.thoughtSignature || SYNTHETIC_THOUGHT_SIGNATURE;
+              const part: any = {
                 functionCall: {
                   name: block.name,
-                  args: block.input || {}
+                  args: block.input || {},
                 }
-              });
+              };
+              if (thoughtSignature) {
+                // Gemini expects thoughtSignature on the part (not inside functionCall)
+                part.thoughtSignature = thoughtSignature;
+              }
+              parts.push(part);
             } else if (block.type === 'tool_result' && block.tool_use_id) {
               // User tool result -> Gemini functionResponse
               const toolName = toolUseMap.get(block.tool_use_id) || 'unknown';
@@ -327,16 +381,21 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
           logger.info(
             `[CLAUDE_PROXY][${requestId}] Sending request model=${model} stream=true text=${textSizeKB}KB`,
           );
-          const streamGen = await config.getGeminiClient().rawGenerateContentStream(
-            contents,
-            {
-              temperature,
-              topP,
-              maxOutputTokens,
-              ...(tools && { tools }),
-              ...(systemInstruction && { systemInstruction }),
-            },
-            new AbortController().signal,
+          const streamGen = await executeWithRetry(
+            () =>
+              config.getGeminiClient().rawGenerateContentStream(
+                contents,
+                {
+                  temperature,
+                  topP,
+                  maxOutputTokens,
+                  ...(tools && { tools }),
+                  ...(systemInstruction && { systemInstruction }),
+                },
+                new AbortController().signal,
+                model,
+              ),
+            requestId,
             model,
           );
 
@@ -533,16 +592,21 @@ export function registerClaudeEndpoints(app: express.Router, defaultConfig: Conf
         logger.info(
           `[CLAUDE_PROXY][${requestId}] Sending request model=${model} stream=false text=${textSizeKB}KB`,
         );
-        const response = await config.getGeminiClient().rawGenerateContent(
-          contents,
-          {
-            temperature,
-            topP,
-            maxOutputTokens,
-            ...(tools && { tools }),
-            ...(systemInstruction && { systemInstruction }),
-          },
-          new AbortController().signal,
+        const response = await executeWithRetry(
+          () =>
+            config.getGeminiClient().rawGenerateContent(
+              contents,
+              {
+                temperature,
+                topP,
+                maxOutputTokens,
+                ...(tools && { tools }),
+                ...(systemInstruction && { systemInstruction }),
+              },
+              new AbortController().signal,
+              model,
+            ),
+          requestId,
           model,
         );
 

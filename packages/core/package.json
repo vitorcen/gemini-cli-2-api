@@ -1,6 +1,6 @@
 {
   "name": "@google/gemini-cli-core",
-  "version": "0.8.0-preview.1-9",
+  "version": "0.8.0-preview.1-11",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
